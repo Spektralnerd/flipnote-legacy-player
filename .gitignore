@@ -1,0 +1,27 @@
+# Generated native/test files
+build/fake/
+build/host-tests/
+build/validation/
+build/libs/
+*.apk
+
+# Local Android/Gradle data
+.gradle/
+local.properties
+app/build/
+
+# Never commit private signing material
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+key.pem
+keystore.properties
+*Signatursicherung*
+*Signaturpasswort*
+
+# Python/editor leftovers
+__pycache__/
+*.pyc
+.DS_Store

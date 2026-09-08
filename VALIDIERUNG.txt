@@ -1,0 +1,75 @@
+Flipnote Legacy Player 1.4.12 – technischer Prüfbericht
+Stand: 8. September 2026
+
+APK: Flipnote-Legacy-Player-v1.4.12-Android-2.1-Browser-Test.apk
+Bytes: 214985
+SHA-256: e429921132eb0845aca5a8ad7e2186a1f4984d236863878342dee57741c4de6b
+Paket: de.offlineflipnote.legacy
+Version: 1.4.12 / Versionscode 28
+Mindest-API: 7 (Android 2.1), Ziel-API: 28 (unverändert)
+Zertifikat SHA-256: 88:DD:F1:34:7A:2A:6C:94:A7:3C:4C:56:AA:FA:DD:46:65:71:C5:F9:7F:02:DF:7D:D7:8E:D1:E2:56:C3:90:A6
+
+UMGESETZT
+- Browser-Menü mit dauerhaft gespeicherter Einstellung für animierte Vorschauen.
+- AUS gibt die vollständigen Vorschau-PPMs und dekodierten Framezustände frei.
+- Android 2.1/2.2 startet ohne vorher gespeicherte Wahl mit statischen Vorschauen.
+- Android 2.3+ behält ohne vorher gespeicherte Wahl animierte Vorschauen bei.
+- Momentum mit zeitabhängiger Verzögerung, Begrenzung an beiden Rändern,
+  Abbremsen durch Berührung, ohne dabei eine Datei versehentlich zu öffnen.
+- Animationen und das Laden kompletter PPMs pausieren während Scrollbewegungen.
+- BrowserActivity als normaler Activity-/Bitmap-Host auf API 7/8, als Router zur
+  bestehenden NativeActivity ab API 9. Ergebnis- und Ordnerparameter bleiben erhalten.
+- libandroid.so wird nicht beim Laden der Playerbibliothek benötigt, sondern nur
+  im API-9+-Browserpfad dynamisch geladen. Keine libjnigraphics-Abhängigkeit.
+- Keine zusätzliche Berechtigung, keine INTERNET- oder WAKE_LOCK-Berechtigung.
+
+ERHALTUNG DES BESTEHENDEN PLAYERS
+Alle 167 vorhandenen DEX-Methodenkörper wurden nach Neunummerierung der
+Tabellenverweise mit der Referenz 1.4.11 verglichen: identische Instruktionen,
+Registerzahlen, Parameterzahlen, Zugriffseigenschaften und Ausnahmebereiche.
+Neu ist eine kleine BrowserActivity mit Konstruktor, Library-Initialisierung und
+acht nativen Methoden. Die ganze DEX-Datei ist NICHT byteidentisch mit 1.4.11.
+Die vorhandenen Java-Playerklassen wurden nicht aus Java neu kompiliert.
+
+TATSÄCHLICH AUSGEFÜHRTE PRÜFUNGEN
+- Cross-Build für ARMv5, ARMv7, x86, ARM64 und x86-64.
+- ELF-Importprüfung: feste Abhängigkeiten nur libc.so und libdl.so; keine ungelösten
+  direkten ANative-/AInput-/AMotion-/AKey-Symbole oder ARM-Laufzeithelfer.
+- DEX 035, Adler32-/SHA1-Integrität, sortierte Strings/Typen/Methoden/Felder/Prototypen.
+- Manifest: minSdk 7, targetSdk 28, Versionscode 28, Paket und Berechtigungen.
+- Nur die API-sichere BrowserActivity besitzt den GET_CONTENT-Auswahlfilter;
+  NativeActivity ist intern und nicht exportiert.
+- Alle bisherigen Host-Regressionstests bestanden.
+- Decoder-/Animations-/Scrolltests unter AddressSanitizer und UndefinedBehaviorSanitizer.
+- 52 geladene Vorschau-Animationen, Umschalten auf AUS: alle Datei- und Framepuffer
+  freigegeben; statische Thumbnails nachgeladen; keine Animationen im statischen Modus.
+- Momentumverzögerung, Randstopp in beiden Richtungen, Unterbrechen durch Tippen,
+  ACTION_CANCEL und kein Nachlauf nach gehaltenem Finger geprüft.
+- 10.000 Zeitstempel-Umrechnungen mit Überlaufverhalten geprüft.
+- Neuer JNI-Activity-Pfad in Desktop-JVM mit Android-Schnittstellen-Doubles ausgeführt:
+  API-7- und API-8-Pfad, Bitmap-Pixelübergabe, statische/animierte Vorschauen,
+  gespeicherte Einstellung, Größenänderung, Low-Memory, Pause/Resume/Destroy,
+  Rückgabe der ausgewählten Datei sowie moderner Intent-Router.
+- APK-Inhaltsdigests und klassische PKCS#7-V1-SHA1/RSA-Signatur kryptografisch geprüft.
+- Signaturzertifikat identisch mit der Referenz-APK, ZIP-Inhalt und Alignment geprüft.
+- Zweiter vollständiger Build in derselben Umgebung: byteidentische APK.
+
+NICHT GEPRÜFT / EINSCHRÄNKUNGEN
+Kein Start und keine Installation auf einem physischen Android-2.1-, Android-2.3-,
+Galaxy-S4- oder Android-16-Gerät. Kein Android-/Dalvik-/ART-Emulator verfügbar.
+Die Desktop-JVM verwendet Test-Doubles für Android-Klassen, keine Android-ROM.
+Die neuen Methoden wurden nicht gegen ein originales API-7-android.jar kompiliert;
+der Java-Quelltext der kleinen Brücke und ihre DEX-Definition liegen bei.
+Kein Leistungsbenchmark auf dem Galaxy S4. Der geringere Decodier- und Speicheraufwand
+bei ausgeschalteten Animationen ist im Code und in Hosttests belegt, aber keine
+bestimmte Bildrate oder vollständige Ruckelfreiheit auf einem echten Gerät garantiert.
+Android 2.1/2.2 ist in dieser Ausgabe eine neue, praktisch noch unbestätigte
+Kompatibilitätserweiterung. Eine Garantie für sämtliche aktuellen oder zukünftigen
+ROMs ist damit nicht verbunden.
+
+TEST AUF DEM GERÄT
+Zuerst über die aktuelle App installieren. Im Browser MENUE öffnen, ANIMIERTE
+VORSCHAUEN auf AUS stellen, Menü schließen und denselben großen Ordner verwenden.
+Zügig wischen, loslassen und durch Aufsetzen des Fingers bremsen. App anschließend
+neu starten und die gespeicherte Auswahl kontrollieren. Auf Android 2.1 zusätzlich
+Installation, Demo mit Bild/Ton und eine kleine Datei aus dem Browser prüfen.

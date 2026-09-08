@@ -1,0 +1,1 @@
+package android.net; public class Uri {public String path; public Uri(String p){path=p;} public static Uri fromFile(java.io.File f){return new Uri(f.getPath());} public static Uri parse(String s){return new Uri(s);} }
