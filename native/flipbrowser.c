@@ -5,6 +5,9 @@
  * This component is deliberately self-contained. It scans the external
  * storage, silently animates every visible PPM preview, and returns the
  * selected file to the existing Java player through Activity.setResult().
+ *
+ * Since v1.4.13 ZIP archives are browsed like folders (zip_archive.inc),
+ * up to 1000 entries per folder are listed and the last folder is restored.
  */
 #include <jni.h>
 #include <stdint.h>
@@ -86,6 +89,8 @@ extern float AMotionEvent_getY(const AInputEvent*, size_t pointer_index);
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #else
 typedef struct __sFILE FILE;
 typedef struct __dirstream DIR;
@@ -105,9 +110,20 @@ extern int strcmp(const char*, const char*);
 extern char* strncpy(char*, const char*, size_t);
 extern FILE* fopen(const char*, const char*);
 extern size_t fread(void*, size_t, size_t, FILE*);
+extern size_t fwrite(const void*, size_t, size_t, FILE*);
 extern int fseek(FILE*, long, int);
 extern long ftell(FILE*);
 extern int fclose(FILE*);
+extern int rename(const char*, const char*);
+extern int unlink(const char*);
+extern int rmdir(const char*);
+extern int mkdir(const char*, unsigned int);
+/* Archives may exceed 2 GB: 64-bit positions via lseek64 (bionic since
+   API 1), while the 32-bit stdio seek stays in use for small files only. */
+extern int open(const char*, int, ...);
+extern int close(int);
+extern long read(int, void*, size_t);
+extern long long lseek64(int, long long, int);
 extern DIR* opendir(const char*);
 extern struct dirent* readdir(DIR*);
 extern int closedir(DIR*);
@@ -149,7 +165,8 @@ extern int pthread_join(pthread_t, void**);
 #define AKEYCODE_DPAD_CENTER 23
 #define AKEYCODE_ENTER 66
 
-#define MAX_ITEMS 320
+#define MAX_ITEMS 1000
+#define MAX_ITEMS_TEXT "MAXIMAL 1000 EINTRAEGE ANGEZEIGT"
 #define MAX_NAME 112
 #define MAX_PATH 640
 #define THUMB_W 64
@@ -292,14 +309,19 @@ typedef struct PpmAnimation {
 static void destroy_animation(PpmAnimation* animation);
 
 /* ---- Browser model ----------------------------------------------------- */
+struct ZipArchive;
+
 typedef struct BrowserItem {
     char name[MAX_NAME];
-    char path[MAX_PATH];
+    char path[MAX_PATH];  /* file system path, or a virtual path inside a ZIP */
     int32_t size;
     int is_access;
     int is_dir;
     int is_parent;
     int is_system;
+    int is_archive;       /* a .zip file shown as an openable folder */
+    int in_zip;           /* a PPM entry inside the currently opened archive */
+    int zip_entry;        /* index into the archive entry table when in_zip */
     int thumb_state; /* 0 not loaded, 1 loaded, -1 invalid */
     uint32_t* thumb;
     PpmAnimation* animation;
@@ -338,6 +360,13 @@ typedef struct BrowserState {
     int reveal_selected;
     char restore_directory[MAX_PATH];
     char restore_path[MAX_PATH];
+
+    /* ZIP archives as folders and the persistent last folder (v1.4.13). */
+    struct ZipArchive* zip;        /* index of the archive named in directory */
+    char cache_root[MAX_PATH];     /* <app cache>/zip, empty when unavailable */
+    char last_directory[MAX_PATH]; /* stored start folder, may be virtual */
+    int directory_dirty;           /* directory changed, preference not saved */
+    int cache_checked;
 
     int animate_previews;
     int menu_open;
@@ -437,6 +466,7 @@ static int item_cmp(const void* av, const void* bv) {
     if (a->is_system != b->is_system) return a->is_system ? -1 : 1;
     if (a->is_parent != b->is_parent) return a->is_parent ? -1 : 1;
     if (a->is_dir != b->is_dir) return a->is_dir ? -1 : 1;
+    if (a->is_archive != b->is_archive) return a->is_archive ? 1 : -1;
     return name_compare_ci(a->name, b->name);
 }
 
@@ -504,14 +534,117 @@ static void set_message(BrowserState* s, const char* text) {
     copy_text(s->message, text, (int)sizeof(s->message));
 }
 
+#include "zip_archive.inc"
+
+/* Keeps the MAX_ITEMS entries that sort first even when a folder holds more,
+   so a truncated listing is always the sorted beginning of the folder and
+   not whatever readdir() happened to return first. */
+static int scan_insert(BrowserState* s, int* count, const BrowserItem* candidate,
+                       int* max_index) {
+    int i;
+    if (*count < MAX_ITEMS) {
+        s->items[(*count)++] = *candidate;
+        *max_index = -1;
+        return 1;
+    }
+    if (*max_index < 0) {
+        *max_index = 0;
+        for (i = 1; i < *count; i++)
+            if (item_cmp(&s->items[i], &s->items[*max_index]) > 0) *max_index = i;
+    }
+    if (item_cmp(candidate, &s->items[*max_index]) >= 0) return 0;
+    s->items[*max_index] = *candidate;
+    *max_index = -1;
+    return 1;
+}
+
+static int browser_open_zip(BrowserState* s, const char* zip_path) {
+    if (s->zip && strcmp(s->zip->path, zip_path) == 0) return 1;
+    if (s->zip) zip_archive_free(s->zip);
+    s->zip = zip_archive_open(zip_path);
+    return s->zip != 0;
+}
+
+static int folder_already_listed(BrowserState* s, int count, const char* folder) {
+    int i;
+    for (i = 0; i < count; i++) {
+        const BrowserItem* it = &s->items[i];
+        if (it->is_dir && !it->is_parent && !it->is_archive
+                && strcmp(it->name, folder) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Lists the sub folders and PPM entries directly below `inner` of the
+   opened archive. Entries are grouped by folder in almost every archive,
+   so remembering the previous folder name avoids most duplicate checks. */
+static int scan_zip_entries(BrowserState* s, const char* inner, int* count,
+                            int* dropped, int* max_index, int* unsupported) {
+    ZipArchive* zip = s->zip;
+    char prefix[MAX_PATH];
+    char last_folder[MAX_NAME];
+    BrowserItem candidate;
+    int prefix_len, i, content = 0;
+
+    copy_text(prefix, inner, MAX_PATH);
+    prefix_len = (int)strlen(prefix);
+    if (prefix_len > 0 && prefix_len < MAX_PATH - 1) {
+        prefix[prefix_len++] = '/';
+        prefix[prefix_len] = 0;
+    }
+    last_folder[0] = 0;
+    for (i = 0; i < zip->entry_count; i++) {
+        const char* name = zip_entry_name(zip, i);
+        const char* rest;
+        int slash = -1, j;
+        if (!text_starts_with(name, prefix)) continue;
+        rest = name + prefix_len;
+        for (j = 0; rest[j]; j++) if (rest[j] == '/') { slash = j; break; }
+        memset(&candidate, 0, sizeof(candidate));
+        if (slash >= 0) {
+            char folder[MAX_NAME];
+            if (slash >= MAX_NAME) continue;
+            memcpy(folder, rest, (size_t)slash);
+            folder[slash] = 0;
+            if (strcmp(folder, last_folder) == 0) continue;
+            copy_text(last_folder, folder, MAX_NAME);
+            if (folder_already_listed(s, *count, folder)) continue;
+            if (strlen(zip->path) + 1 + (size_t)prefix_len + (size_t)slash >= MAX_PATH) continue;
+            candidate.is_dir = 1;
+            copy_text(candidate.name, folder, MAX_NAME);
+            join_path(candidate.path, zip->path, prefix);
+            copy_text(candidate.path + strlen(candidate.path), folder,
+                      MAX_PATH - (int)strlen(candidate.path));
+        } else {
+            if (strlen(zip->path) + 1 + strlen(name) >= MAX_PATH) continue;
+            candidate.in_zip = 1;
+            candidate.zip_entry = i;
+            candidate.size = (int32_t)zip->entries[i].locator.uncompressed_size;
+            copy_text(candidate.name, rest, MAX_NAME);
+            join_path(candidate.path, zip->path, name);
+            if (!zip_locator_supported(&zip->entries[i].locator)) (*unsupported)++;
+        }
+        content++;
+        if (!scan_insert(s, count, &candidate, max_index)) (*dropped)++;
+    }
+    return content;
+}
+
 static int scan_directory(BrowserState* s, const char* path) {
     DIR* dir;
     struct dirent* ent;
     char full[MAX_PATH];
     char requested[MAX_PATH];
+    char zip_path[MAX_PATH];
+    char inner[MAX_PATH];
     BrowserItem* it;
+    BrowserItem candidate;
     int count = 0;
     int content_count = 0;
+    int dropped = 0;
+    int unsupported = 0;
+    int max_index = -1;
+    int in_archive;
 
     /* The requested path can point into the current item array. Keep a copy
        before clearing that array for the next directory. */
@@ -542,58 +675,122 @@ static int scan_directory(BrowserState* s, const char* path) {
         it->is_system = 1;
     }
 
-    dir = opendir(path);
-
-    if (!dir) {
-        copy_text(s->directory, path, MAX_PATH);
-        s->item_count = count;
-        if (s->activity->sdkVersion >= 33 && !s->manage_access)
-            set_message(s, "DATEIZUGRIFF ANTIPPEN UND ALLE DATEIEN ERLAUBEN");
-        else
-            set_message(s, "ORDNER NICHT LESBAR - SPEICHERBERECHTIGUNG PRUEFEN");
-        s->redraw = 1;
-        return 0;
-    }
-
-    if (!path_is_root(path)) {
+    in_archive = zip_split_path(path, zip_path, inner);
+    if (in_archive) {
+        /* The parent card comes first so an unreadable archive still has
+           a way back on screen. */
         it = &s->items[count++];
         copy_text(it->name, "..", MAX_NAME);
         parent_path(path, it->path);
         it->is_dir = 1;
         it->is_parent = 1;
-    }
-
-    while (count < MAX_ITEMS && (ent = readdir(dir)) != 0) {
-        int is_dir = 0;
-        if (ent->d_name[0] == '.' && (ent->d_name[1] == 0
-                || (ent->d_name[1] == '.' && ent->d_name[2] == 0))) continue;
-        join_path(full, path, ent->d_name);
-        if (ent->d_type == DT_DIR) {
-            is_dir = 1;
-        } else if (ent->d_type != DT_REG) {
-            DIR* test = opendir(full);
-            if (test) { is_dir = 1; closedir(test); }
+        if (!browser_open_zip(s, zip_path)) {
+            copy_text(s->directory, path, MAX_PATH);
+            s->item_count = count;
+            set_message(s, "ZIP NICHT LESBAR - KEIN ZIP ODER DEFEKT");
+            s->redraw = 1;
+            return 0;
         }
-        if (!is_dir && !ends_ppm(ent->d_name)) continue;
-        it = &s->items[count++];
-        copy_text(it->name, ent->d_name, MAX_NAME);
-        copy_text(it->path, full, MAX_PATH);
-        it->is_dir = is_dir;
-        it->size = is_dir ? 0 : file_size32(full);
-        content_count++;
+        content_count = scan_zip_entries(s, inner, &count, &dropped, &max_index, &unsupported);
+    } else {
+        dir = opendir(path);
+
+        if (!dir) {
+            copy_text(s->directory, path, MAX_PATH);
+            s->item_count = count;
+            if (s->activity->sdkVersion >= 33 && !s->manage_access)
+                set_message(s, "DATEIZUGRIFF ANTIPPEN UND ALLE DATEIEN ERLAUBEN");
+            else
+                set_message(s, "ORDNER NICHT LESBAR - SPEICHERBERECHTIGUNG PRUEFEN");
+            s->redraw = 1;
+            return 0;
+        }
+
+        if (!path_is_root(path)) {
+            it = &s->items[count++];
+            copy_text(it->name, "..", MAX_NAME);
+            parent_path(path, it->path);
+            it->is_dir = 1;
+            it->is_parent = 1;
+        }
+
+        while ((ent = readdir(dir)) != 0) {
+            int is_dir = 0;
+            if (ent->d_name[0] == '.' && (ent->d_name[1] == 0
+                    || (ent->d_name[1] == '.' && ent->d_name[2] == 0))) continue;
+            join_path(full, path, ent->d_name);
+            if (ent->d_type == DT_DIR) {
+                is_dir = 1;
+            } else if (ent->d_type != DT_REG) {
+                DIR* test = opendir(full);
+                if (test) { is_dir = 1; closedir(test); }
+            }
+            if (!is_dir && !ends_ppm(ent->d_name) && !ends_zip(ent->d_name)) continue;
+            memset(&candidate, 0, sizeof(candidate));
+            copy_text(candidate.name, ent->d_name, MAX_NAME);
+            copy_text(candidate.path, full, MAX_PATH);
+            if (is_dir) {
+                candidate.is_dir = 1;
+            } else if (ends_zip(ent->d_name)) {
+                /* Archives open like folders; sorted after real folders. */
+                candidate.is_dir = 1;
+                candidate.is_archive = 1;
+            } else {
+                candidate.size = file_size32(full);
+            }
+            content_count++;
+            if (!scan_insert(s, &count, &candidate, &max_index)) dropped++;
+        }
+        closedir(dir);
     }
-    closedir(dir);
 
     if (count > 1) qsort(s->items, (size_t)count, sizeof(BrowserItem), item_cmp);
     s->item_count = count;
     copy_text(s->directory, path, MAX_PATH);
+    s->directory_dirty = 1;
     if (s->activity->sdkVersion >= 33 && !s->manage_access)
         set_message(s, "DATEIEN AUSGEBLENDET - DATEIZUGRIFF ANTIPPEN");
     else if (content_count == 0)
-        set_message(s, "KEINE ORDNER ODER PPM-DATEIEN");
-    else if (count >= MAX_ITEMS) set_message(s, "MAXIMAL 320 EINTRAEGE ANGEZEIGT");
+        set_message(s, in_archive ? "ZIP: KEINE ORDNER ODER PPM-DATEIEN"
+                                  : "KEINE ORDNER ODER PPM-DATEIEN");
+    else if (dropped > 0) set_message(s, MAX_ITEMS_TEXT);
+    else if (in_archive && s->zip->truncated)
+        set_message(s, "ZIP-INDEX VOLL - NICHT ALLE EINTRAEGE GELISTET");
+    else if (unsupported > 0)
+        set_message(s, "ZIP: EINTRAEGE MIT VERSCHLUESSELUNG/METHODE OHNE SUPPORT");
     s->redraw = 1;
     return 1;
+}
+
+/* Directories and archives count as readable browser targets. */
+static int browser_target_readable(const char* path) {
+    char zip_path[MAX_PATH];
+    char inner[MAX_PATH];
+    if (path[0] != '/') return 0;
+    if (zip_split_path(path, zip_path, inner)) return 1;
+    return directory_readable(path);
+}
+
+/* Folder inside the opened archive that the current listing shows. */
+static const char* browser_zip_inner(BrowserState* s) {
+    const char* inner;
+    if (!s->zip || !text_starts_with(s->directory, s->zip->path)) return "";
+    inner = s->directory + strlen(s->zip->path);
+    while (*inner == '/') inner++;
+    return inner;
+}
+
+static const ZipLocator* browser_item_locator(BrowserState* s, const BrowserItem* it) {
+    if (!it->in_zip || !s->zip || it->zip_entry < 0
+            || it->zip_entry >= s->zip->entry_count) return 0;
+    return &s->zip->entries[it->zip_entry].locator;
+}
+
+/* Cache file that holds (or will hold) the extracted copy of a ZIP item. */
+static int browser_item_cache_path(BrowserState* s, const BrowserItem* it, char* out) {
+    out[0] = 0;
+    if (!browser_item_locator(s, it) || !s->cache_root[0]) return 0;
+    return zip_cache_path(s->cache_root, s->zip->path, browser_zip_inner(s), it->name, out);
 }
 
 /* ---- PPM thumbnail decoding ------------------------------------------- */
@@ -604,22 +801,16 @@ static const uint32_t ppm_palette[16] = {
     0xb657b7, 0x00ff00, 0x00ff00, 0x00ff00
 };
 
-static int decode_thumbnail(const char* path, uint32_t* out) {
-    FILE* f;
-    unsigned char signature[4];
-    unsigned char data[PPM_THUMB_BYTES];
+#define PPM_HEAD_BYTES (PPM_THUMB_OFFSET + PPM_THUMB_BYTES)
+
+/* Decodes the embedded 64x48 thumbnail from the first PPM_HEAD_BYTES of a
+   file, whether they came from disk or straight out of a ZIP entry. */
+static int decode_thumbnail_bytes(const unsigned char* head, int size, uint32_t* out) {
+    const unsigned char* data;
     int tx, ty, row, pair, pos = 0;
-    f = fopen(path, "rb");
-    if (!f) return 0;
-    if (fread(signature, 1, 4, f) != 4
-            || signature[0] != 'P' || signature[1] != 'A'
-            || signature[2] != 'R' || signature[3] != 'A'
-            || fseek(f, PPM_THUMB_OFFSET, SEEK_SET) != 0
-            || fread(data, 1, PPM_THUMB_BYTES, f) != PPM_THUMB_BYTES) {
-        fclose(f);
-        return 0;
-    }
-    fclose(f);
+    if (size < PPM_HEAD_BYTES || head[0] != 'P' || head[1] != 'A'
+            || head[2] != 'R' || head[3] != 'A') return 0;
+    data = head + PPM_THUMB_OFFSET;
     for (ty = 0; ty < 6; ty++) {
         for (tx = 0; tx < 8; tx++) {
             for (row = 0; row < 8; row++) {
@@ -634,6 +825,17 @@ static int decode_thumbnail(const char* path, uint32_t* out) {
         }
     }
     return 1;
+}
+
+static int decode_thumbnail(const char* path, uint32_t* out) {
+    FILE* f;
+    unsigned char head[PPM_HEAD_BYTES];
+    size_t got;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    got = fread(head, 1, PPM_HEAD_BYTES, f);
+    fclose(f);
+    return decode_thumbnail_bytes(head, (int)got, out);
 }
 
 /* ---- Full PPM frame decoding for silent animated previews ------------- */
@@ -839,30 +1041,27 @@ static void destroy_animation(PpmAnimation* animation) {
     free(animation);
 }
 
-static PpmAnimation* create_animation(const char* path, uint32_t* thumbnail,
-                                      uint32_t now) {
+/* Builds the silent preview from complete PPM bytes. Takes ownership of
+   `data` (freed on failure as well). */
+static PpmAnimation* create_animation_bytes(unsigned char* data, int file_size,
+                                            uint32_t* thumbnail, uint32_t now) {
     static const int frame_intervals[9] = {
         2000, 2000, 1000, 500, 250, 167, 83, 50, 33
     };
     PpmAnimation* animation = 0;
-    FILE* file = 0;
-    int file_size = file_size32(path);
     int frame_count, table_size, speed_index = 5;
     int frame, sound_header_offset;
     uint32_t animation_data_size, relative;
 
-    if (file_size < PPM_MIN_BYTES || file_size > PPM_MAX_PREVIEW_BYTES) return 0;
+    if (!data) return 0;
+    if (file_size < PPM_MIN_BYTES || file_size > PPM_MAX_PREVIEW_BYTES) {
+        free(data);
+        return 0;
+    }
     animation = (PpmAnimation*)malloc(sizeof(PpmAnimation));
-    if (!animation) return 0;
+    if (!animation) { free(data); return 0; }
     memset(animation, 0, sizeof(PpmAnimation));
-    animation->data = (unsigned char*)malloc((size_t)file_size);
-    if (!animation->data) goto fail;
-    file = fopen(path, "rb");
-    if (!file) goto fail;
-    if (fread(animation->data, 1, (size_t)file_size, file) != (size_t)file_size)
-        goto fail;
-    fclose(file);
-    file = 0;
+    animation->data = data;
     animation->data_size = file_size;
 
     if (animation->data[0] != 'P' || animation->data[1] != 'A'
@@ -908,9 +1107,36 @@ static PpmAnimation* create_animation(const char* path, uint32_t* thumbnail,
     return animation;
 
 fail:
-    if (file) fclose(file);
     destroy_animation(animation);
     return 0;
+}
+
+static int read_whole_file(const char* path, unsigned char** out_data, int* out_size) {
+    FILE* file;
+    unsigned char* data;
+    int file_size = file_size32(path);
+    if (file_size < PPM_MIN_BYTES || file_size > PPM_MAX_PREVIEW_BYTES) return 0;
+    data = (unsigned char*)malloc((size_t)file_size);
+    if (!data) return 0;
+    file = fopen(path, "rb");
+    if (!file) { free(data); return 0; }
+    if (fread(data, 1, (size_t)file_size, file) != (size_t)file_size) {
+        fclose(file);
+        free(data);
+        return 0;
+    }
+    fclose(file);
+    *out_data = data;
+    *out_size = file_size;
+    return 1;
+}
+
+static PpmAnimation* create_animation(const char* path, uint32_t* thumbnail,
+                                      uint32_t now) {
+    unsigned char* data = 0;
+    int size = 0;
+    if (!read_whole_file(path, &data, &size)) return 0;
+    return create_animation_bytes(data, size, thumbnail, now);
 }
 
 /* Returns 1 when a new frame was rendered, 0 when nothing was due and -1
@@ -969,6 +1195,28 @@ static int evict_thumbnail(BrowserState* s, int protect_first, int protect_last)
     return 1;
 }
 
+/* Static preview of a ZIP entry: only the header and thumbnail bytes are
+   inflated, which keeps large archives responsive on slow devices. */
+static int decode_zip_thumbnail(BrowserState* s, const BrowserItem* it, uint32_t* out) {
+    unsigned char head[PPM_HEAD_BYTES];
+    const ZipLocator* loc;
+    if (!s->zip || it->zip_entry < 0 || it->zip_entry >= s->zip->entry_count) return 0;
+    loc = &s->zip->entries[it->zip_entry].locator;
+    if (loc->uncompressed_size < (uint32_t)PPM_HEAD_BYTES) return 0;
+    if (!zip_read_locator(s->zip->path, loc, head, PPM_HEAD_BYTES, 0)) return 0;
+    return decode_thumbnail_bytes(head, PPM_HEAD_BYTES, out);
+}
+
+static PpmAnimation* create_zip_animation(BrowserState* s, const BrowserItem* it,
+                                          uint32_t* thumbnail, uint32_t now) {
+    unsigned char* data = 0;
+    int size = 0;
+    if (!s->zip || it->zip_entry < 0 || it->zip_entry >= s->zip->entry_count) return 0;
+    if (!zip_read_locator_all(s->zip->path, &s->zip->entries[it->zip_entry].locator,
+                              &data, &size)) return 0;
+    return create_animation_bytes(data, size, thumbnail, now);
+}
+
 static void load_one_thumbnail(BrowserState* s, int first, int last) {
     int i;
     if (s->menu_open || (s->animate_previews && (s->touching || s->fling_velocity))) return;
@@ -984,9 +1232,15 @@ static void load_one_thumbnail(BrowserState* s, int first, int last) {
             (void)evict_thumbnail(s, first, last);
             thumb = (uint32_t*)malloc(THUMB_PIXELS * sizeof(uint32_t));
             if (!thumb) { it->thumb_state = -1; return; }
-            static_ok = decode_thumbnail(it->path, thumb);
-            animation = s->animate_previews
-                ? create_animation(it->path, thumb, monotonicish_millis()) : 0;
+            if (it->in_zip) {
+                static_ok = decode_zip_thumbnail(s, it, thumb);
+                animation = s->animate_previews && static_ok
+                    ? create_zip_animation(s, it, thumb, monotonicish_millis()) : 0;
+            } else {
+                static_ok = decode_thumbnail(it->path, thumb);
+                animation = s->animate_previews
+                    ? create_animation(it->path, thumb, monotonicish_millis()) : 0;
+            }
             if (animation || static_ok) {
                 it->thumb = thumb;
                 it->animation = animation;
@@ -1088,8 +1342,10 @@ static uint8_t glyph_row(char input, int row) {
         case ';': return row == 2 || row == 5 ? 4 : row == 6 ? 8 : 0;
         case '-': return row == 3 ? 14 : 0;
         case '_': return row == 6 ? 31 : 0;
-        case '/': return (uint8_t)(1 << (4 - imin(4, imax(0, row - 1))));
-        case '\\': return (uint8_t)(1 << imin(4, imax(0, row - 1)));
+        /* Bit 4 is the leftmost column: a slash runs from top right to
+           bottom left, a backslash the other way (swapped before 1.4.14). */
+        case '/': return (uint8_t)(1 << imin(4, imax(0, row - 1)));
+        case '\\': return (uint8_t)(1 << (4 - imin(4, imax(0, row - 1))));
         case '[': return row == 0 || row == 6 ? 14 : 8;
         case ']': return row == 0 || row == 6 ? 14 : 2;
         case '(': return row == 0 || row == 6 ? 2 : 4;
@@ -1136,6 +1392,21 @@ static void draw_folder(Canvas* c, int x, int y, int w, int h, int parent) {
     fill_rect(c, fx, fy + imax(4, fh / 8), fw, fh - imax(4, fh / 8), col);
     stroke_rect(c, fx, fy + imax(4, fh / 8), fw, fh - imax(4, fh / 8), 2, 0x20242b);
     if (parent) draw_text(c, fx + fw / 2 - 8, fy + fh / 2 - 5, "..", 1, 0x111318, 20);
+}
+
+/* A ZIP archive card: folder silhouette in its own colour plus a zipper
+   line and "ZIP" label, drawn from rectangles like the other icons. */
+static void draw_archive(Canvas* c, int x, int y, int w, int h) {
+    int fw = imin(w - 16, 92), fh = imin(h - 18, 62);
+    int fx = x + (w - fw) / 2, fy = y + (h - fh) / 2 + 4;
+    int tab = imax(4, fh / 8), i;
+    uint32_t col = 0x4fc3a1;
+    fill_rect(c, fx + 4, fy, fw / 2, imax(5, fh / 6), col);
+    fill_rect(c, fx, fy + tab, fw, fh - tab, col);
+    stroke_rect(c, fx, fy + tab, fw, fh - tab, 2, 0x20242b);
+    for (i = fy + tab + 6; i < fy + fh - 6; i += 6)
+        fill_rect(c, fx + fw / 2 - 2, i, 4, 3, 0x20242b);
+    draw_text(c, fx + 6, fy + fh - 13, "ZIP", 1, 0x111318, fw - 12);
 }
 
 static void draw_system_picker(Canvas* c, int x, int y, int w, int h) {
@@ -1290,6 +1561,8 @@ static void draw_browser(BrowserState* s, Canvas* c) {
             draw_access(c, tx, ty, tw, thumb_h);
         } else if (it->is_system) {
             draw_system_picker(c, tx, ty, tw, thumb_h);
+        } else if (it->is_archive) {
+            draw_archive(c, tx, ty, tw, thumb_h);
         } else if (it->is_dir) {
             draw_folder(c, tx, ty, tw, thumb_h, it->is_parent);
         } else if (it->thumb) {
@@ -1305,9 +1578,18 @@ static void draw_browser(BrowserState* s, Canvas* c) {
         } else if (it->is_system) {
             draw_text(c, x + 4, y + thumb_h + 19,
                       "ANDROID-DIALOG", 1, 0x9ca5b3, card_w - 8);
+        } else if (it->is_archive) {
+            draw_text(c, x + 4, y + thumb_h + 19, "ZIP-ARCHIV", 1, 0x9ca5b3, card_w - 8);
         } else if (!it->is_dir) {
-            size_text(it->size, sizebuf);
-            draw_text(c, x + 4, y + thumb_h + 19, sizebuf, 1, 0x9ca5b3, card_w - 8);
+            if (it->in_zip && s->zip && it->zip_entry >= 0
+                    && it->zip_entry < s->zip->entry_count
+                    && !zip_locator_supported(&s->zip->entries[it->zip_entry].locator)) {
+                draw_text(c, x + 4, y + thumb_h + 19, "NICHT UNTERSTUETZT", 1,
+                          0xffc26b, card_w - 8);
+            } else {
+                size_text(it->size, sizebuf);
+                draw_text(c, x + 4, y + thumb_h + 19, sizebuf, 1, 0x9ca5b3, card_w - 8);
+            }
         } else {
             draw_text(c, x + 4, y + thumb_h + 19,
                       it->is_parent ? "ORDNER HOCH" : "ORDNER", 1, 0x9ca5b3, card_w - 8);
@@ -1567,7 +1849,7 @@ static void return_selected_file(BrowserState* s, JNIEnv* env, const char* path)
     jmethodID file_ctor, from_file, intent_ctor, set_data, add_flags, set_result;
     jstring jpath;
     jobject file_obj, uri_obj, intent_obj;
-    if (s->finishing) return;
+    if (s->finishing || !env) return;
     s->finishing = 1;
     relax_file_uri_policy(env);
     file_cls = (*env)->FindClass(env, "java/io/File");
@@ -1605,12 +1887,29 @@ static void return_selected_file(BrowserState* s, JNIEnv* env, const char* path)
 /* ---- Interaction ------------------------------------------------------- */
 static void open_item(BrowserState* s, JNIEnv* env, int index) {
     BrowserItem* it;
+    char cache_path[MAX_PATH];
     if (index < 0 || index >= s->item_count) return;
     it = &s->items[index];
     if (it->is_access) launch_manage_storage_settings(s, env);
     else if (it->is_system) launch_system_picker(s, env);
     else if (it->is_dir) scan_directory(s, it->path);
-    else {
+    else if (it->in_zip) {
+        /* The Java player needs an ordinary file: extract into the app
+           cache first, then hand that copy over exactly like a file. */
+        const ZipLocator* loc = browser_item_locator(s, it);
+        if (!loc || !zip_locator_supported(loc)) {
+            set_message(s, "ZIP-EINTRAG NICHT UNTERSTUETZT (VERSCHLUESSELT/METHODE)");
+        } else if (!browser_item_cache_path(s, it, cache_path)) {
+            set_message(s, "KEIN CACHE-ORDNER FUER ZIP-DATEIEN");
+        } else if (!zip_cache_ensure(cache_path, s->zip->path, loc)) {
+            set_message(s, "ENTPACKEN FEHLGESCHLAGEN - ZIP DEFEKT ODER SPEICHER VOLL");
+        } else {
+            gallery_prepare_selection(s, index);
+            return_selected_file(s, env, cache_path);
+            return;
+        }
+        s->redraw = 1;
+    } else {
         gallery_prepare_selection(s, index);
         return_selected_file(s, env, it->path);
     }
@@ -1707,13 +2006,13 @@ static void choose_start_directory(BrowserState* s) {
     path[0] = 0;
 
     /* A return from the player should reopen the exact originating folder
-       and highlight the Flipnote that is currently active after swiping. */
+       and highlight the Flipnote that is currently active after swiping.
+       Both paths may point into a ZIP archive. */
     if (s->restore_pending) {
         int found = -1;
         s->restore_pending = 0;
-        if (s->restore_directory[0] == '/'
-                && directory_readable(s->restore_directory)) {
-            scan_directory(s, s->restore_directory);
+        if (browser_target_readable(s->restore_directory)
+                && scan_directory(s, s->restore_directory)) {
             for (i = 0; i < s->item_count; i++) {
                 if (!s->items[i].is_access && !s->items[i].is_system
                         && !s->items[i].is_dir
@@ -1729,6 +2028,11 @@ static void choose_start_directory(BrowserState* s) {
             return;
         }
     }
+    /* Otherwise continue where the browser was last closed. A folder that
+       has disappeared (SD card removed, archive deleted) falls through to
+       the storage roots below. */
+    if (browser_target_readable(s->last_directory)
+            && scan_directory(s, s->last_directory)) return;
     if (ext && ext[0]) {
         copy_text(path, ext, MAX_PATH);
         for (i = 0; path[i]; i++) {
@@ -1800,6 +2104,8 @@ static void* browser_thread(void* arg) {
     int first = 0, last = -1;
     (*s->activity->vm)->AttachCurrentThread(s->activity->vm, (void**)&env, 0);
     browser_read_preferences(s, env);
+    browser_read_cache_dir(s, env);
+    zip_cache_wipe_if_fresh(s->cache_root);
     s->manage_access = has_manage_storage_access(s, env);
     if (!s->permission_pending || permission_granted_worker(s, env)) {
         s->permission_pending = 0;
@@ -1821,7 +2127,7 @@ static void* browser_thread(void* arg) {
                 s->manage_access = granted;
                 s->manage_settings_open = 0;
                 copy_text(current, s->directory, MAX_PATH);
-                if (current[0] == '/' && directory_readable(current))
+                if (browser_target_readable(current))
                     scan_directory(s, current);
                 else
                     choose_start_directory(s);
@@ -1835,6 +2141,10 @@ static void* browser_thread(void* arg) {
             }
         }
         process_input(s, env, w, h);
+        if (s->directory_dirty && !s->permission_pending) {
+            s->directory_dirty = 0;
+            browser_save_last_directory(s, env);
+        }
         if (s->trim_requested) {
             s->trim_requested = 0;
             free_thumbnails(s);
@@ -1867,6 +2177,7 @@ static void cb_destroy(ANativeActivity* activity) {
     pthread_join(s->thread, 0);
     while (s->draw_busy || s->input_busy) usleep(1000);
     free_thumbnails(s);
+    if (s->zip) zip_archive_free(s->zip);
     free(s);
     activity->instance = 0;
 }

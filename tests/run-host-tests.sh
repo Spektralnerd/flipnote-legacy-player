@@ -14,20 +14,33 @@ if [ -z "$CLANG" ] || [ -z "${JAVA_HOME:-}" ]; then
   exit 1
 fi
 mkdir -p "$OUT"
-FLAGS="-O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror"
+# _FILE_OFFSET_BITS=64 keeps lseek 64-bit on 32-bit hosts (archives beyond 2 GB).
+FLAGS="-O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64"
 if [ "${SANITIZE:-0}" = 1 ]; then
   FLAGS="$FLAGS -O1 -g -fsanitize=address,undefined"
 fi
+# GCC (CLANG=gcc, e.g. when the clang sanitizer runtime is missing) reports
+# maybe-uninitialized false positives in the unchanged pager code.
+case "$CLANG" in *gcc*) FLAGS="$FLAGS -Wno-maybe-uninitialized" ;; esac
 # shellcheck disable=SC2086
 "$CLANG" $FLAGS -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
   "$ROOT/tests/host_decoder_test.c" -Wl,--gc-sections -o "$OUT/decoder-test"
 # shellcheck disable=SC2086
 "$CLANG" $FLAGS -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
   "$ROOT/tests/host_animation_stress.c" -Wl,--gc-sections -o "$OUT/stress-test"
+# shellcheck disable=SC2086
+"$CLANG" $FLAGS -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+  "$ROOT/tests/host_zip_test.c" -Wl,--gc-sections -o "$OUT/zip-test"
 "$OUT/decoder-test" \
   "$ROOT/tests/data/synthetic-test.ppm" \
   "$ROOT/tests/data/translation-test.ppm"
 "$OUT/stress-test" "$ROOT/tests/data/synthetic-test.ppm"
+# ZIP archives as folders (v1.4.13): fixtures are generated, never committed.
+rm -rf "$OUT/zip-fixtures"
+python3 "$ROOT/tests/make_zip_fixtures.py" "$OUT/zip-fixtures" \
+  "$ROOT/tests/data/synthetic-test.ppm" "$ROOT/tests/data/translation-test.ppm"
+"$OUT/zip-test" "$OUT/zip-fixtures" \
+  "$ROOT/tests/data/synthetic-test.ppm" "$ROOT/tests/data/translation-test.ppm"
 python3 "$ROOT/tests/test_thumbnail_cache.py"
 python3 "$ROOT/tests/test_aspect_ratio.py"
 python3 "$ROOT/tests/test_gallery_swipe.py"
@@ -44,3 +57,4 @@ python3 "$ROOT/tests/test_player_zoom.py"
 python3 "$ROOT/tests/test_immersive_fullscreen.py"
 
 python3 "$ROOT/tests/test_edge_to_edge_cutout.py"
+python3 "$ROOT/tests/test_zip_browser.py"

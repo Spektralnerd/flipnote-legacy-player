@@ -2,7 +2,7 @@
 """Regression model for the visible-thumbnail cache policy in v1.3.9."""
 
 CACHE_LIMIT = 24
-ITEM_COUNT = 320
+ITEM_COUNT = 1000
 THUMBNAIL_BYTES = 64 * 48 * 4
 
 

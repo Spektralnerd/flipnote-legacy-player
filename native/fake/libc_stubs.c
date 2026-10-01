@@ -6,6 +6,10 @@ void* memcpy(void*a,const void*b,size_t c){return a;} size_t strlen(const char*a
 int strcmp(const char*a,const char*b){return 0;} char* strncpy(char*a,const char*b,size_t c){return a;}
 FILE* fopen(const char*a,const char*b){return 0;} size_t fread(void*a,size_t b,size_t c,FILE*d){return 0;}
 int fseek(FILE*a,long b,int c){return 0;} long ftell(FILE*a){return 0;} int fclose(FILE*a){return 0;}
+size_t fwrite(const void*a,size_t b,size_t c,FILE*d){return 0;} int rename(const char*a,const char*b){return 0;}
+int unlink(const char*a){return 0;} int rmdir(const char*a){return 0;} int mkdir(const char*a,unsigned int b){return 0;}
+int open(const char*a,int b,...){return -1;} int close(int a){return 0;} long read(int a,void*b,size_t c){return 0;}
+long long lseek64(int a,long long b,int c){return -1;}
 DIR* opendir(const char*a){return 0;} struct dirent* readdir(DIR*a){return 0;} int closedir(DIR*a){return 0;}
 void qsort(void*a,size_t b,size_t c,int(*d)(const void*,const void*)){} int usleep(unsigned int a){return 0;}
 struct timeval { long tv_sec; long tv_usec; }; int gettimeofday(struct timeval*a,void*b){return 0;}

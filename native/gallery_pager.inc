@@ -34,13 +34,20 @@
 #define AMOTION_EVENT_ACTION_POINTER_DOWN 5
 #define AMOTION_EVENT_ACTION_POINTER_UP 6
 
-/* Written by the browser worker, consumed by MainActivity's UI thread. */
+/* Written by the browser worker, consumed by MainActivity's UI thread.
+   For a folder inside a ZIP archive, paths[] are the cache copies the Java
+   player opens, locators[] say how to extract them on demand and
+   virtual_directory keeps the archive folder for the browser return. */
 typedef struct GallerySelection {
     volatile int lock;
     int generation;
     int count;
     int current;
+    int from_zip;
+    char zip_path[MAX_PATH];
+    char virtual_directory[MAX_PATH];
     char paths[MAX_ITEMS][MAX_PATH];
+    ZipLocator locators[MAX_ITEMS];
 } GallerySelection;
 
 /* Adjacent pages are Java PpmPlayerView/PpmFile objects. Their frame clocks
@@ -76,7 +83,11 @@ typedef struct GalleryRuntime {
     int count;
     int current;
     int list_matches_note;
+    int from_zip;
+    char zip_path[MAX_PATH];
+    char virtual_directory[MAX_PATH];
     char paths[MAX_ITEMS][MAX_PATH];
+    ZipLocator locators[MAX_ITEMS];
 
     int page_width;
     int page_height;
@@ -154,13 +165,22 @@ static int gallery_prepare_browser_return_request(
         char* out_directory, char* out_selected_path) {
     const char* selected;
     char directory[MAX_PATH];
+    char virtual_selected[MAX_PATH];
     if (!g_gallery_runtime.list_matches_note
             || g_gallery_runtime.current < 0
             || g_gallery_runtime.current >= g_gallery_runtime.count)
         return 0;
     selected = g_gallery_runtime.paths[g_gallery_runtime.current];
     if (!selected || selected[0] != '/') return 0;
-    parent_path(selected, directory);
+    if (g_gallery_runtime.from_zip) {
+        /* Return into the archive folder, not into the extraction cache. */
+        if (g_gallery_runtime.virtual_directory[0] != '/') return 0;
+        copy_text(directory, g_gallery_runtime.virtual_directory, MAX_PATH);
+        join_path(virtual_selected, directory, path_basename(selected));
+        selected = virtual_selected;
+    } else {
+        parent_path(selected, directory);
+    }
     if (out_directory) copy_text(out_directory, directory, MAX_PATH);
     if (out_selected_path) copy_text(out_selected_path, selected, MAX_PATH);
     browser_return_lock();
@@ -201,28 +221,54 @@ static const char* gallery_basename(const char* path) {
     return result;
 }
 
-/* Capture only the actual PPM files, in the same sorted order as the grid. */
+/* Capture only the actual PPM files, in the same sorted order as the grid.
+   Entries of a ZIP folder are captured as their future cache copies plus the
+   locator needed to extract each one when the pager reaches it. */
 static void gallery_prepare_selection(BrowserState* s, int selected_item) {
     int i;
     int current = -1;
     int count = 0;
+    int from_zip = 0;
     gallery_selection_lock();
     for (i = 0; i < s->item_count && count < MAX_ITEMS; i++) {
         BrowserItem* item = &s->items[i];
         if (item->is_access || item->is_system || item->is_dir) continue;
-        copy_text(g_gallery_selection.paths[count], item->path, MAX_PATH);
+        if (item->in_zip) {
+            const ZipLocator* loc = browser_item_locator(s, item);
+            if (!loc || !zip_locator_supported(loc)) continue;
+            if (!browser_item_cache_path(s, item, g_gallery_selection.paths[count])) continue;
+            g_gallery_selection.locators[count] = *loc;
+            from_zip = 1;
+        } else {
+            copy_text(g_gallery_selection.paths[count], item->path, MAX_PATH);
+            memset(&g_gallery_selection.locators[count], 0, sizeof(ZipLocator));
+        }
         if (i == selected_item) current = count;
         count++;
     }
     if (current < 0 || current >= count) {
         count = 0;
         current = 0;
+        from_zip = 0;
     }
+    g_gallery_selection.from_zip = from_zip;
+    copy_text(g_gallery_selection.zip_path, from_zip && s->zip ? s->zip->path : "", MAX_PATH);
+    copy_text(g_gallery_selection.virtual_directory, from_zip ? s->directory : "", MAX_PATH);
     g_gallery_selection.count = count;
     g_gallery_selection.current = current;
     g_gallery_selection.generation++;
     if (g_gallery_selection.generation <= 0) g_gallery_selection.generation = 1;
     gallery_selection_unlock();
+}
+
+/* Extracts the cache copy for a ZIP-backed page if it is missing. Regular
+   files need nothing. Returns 1 when the path can be opened afterwards. */
+static int gallery_materialize(int index) {
+    if (index < 0 || index >= g_gallery_runtime.count) return 0;
+    if (!g_gallery_runtime.from_zip) return 1;
+    return zip_cache_ensure(g_gallery_runtime.paths[index],
+                            g_gallery_runtime.zip_path,
+                            &g_gallery_runtime.locators[index]);
 }
 
 static void gallery_delete_global(JNIEnv* env, jobject* ref) {
@@ -764,6 +810,9 @@ static void gallery_clear_selection(void) {
     gallery_selection_lock();
     g_gallery_selection.count = 0;
     g_gallery_selection.current = 0;
+    g_gallery_selection.from_zip = 0;
+    g_gallery_selection.zip_path[0] = 0;
+    g_gallery_selection.virtual_directory[0] = 0;
     g_gallery_selection.generation++;
     if (g_gallery_selection.generation <= 0) g_gallery_selection.generation = 1;
     gallery_selection_unlock();
@@ -1310,8 +1359,14 @@ static int gallery_copy_selection_if_changed(void) {
         g_gallery_runtime.generation = g_gallery_selection.generation;
         g_gallery_runtime.count = g_gallery_selection.count;
         g_gallery_runtime.current = g_gallery_selection.current;
-        for (i = 0; i < g_gallery_selection.count; i++)
+        g_gallery_runtime.from_zip = g_gallery_selection.from_zip;
+        copy_text(g_gallery_runtime.zip_path, g_gallery_selection.zip_path, MAX_PATH);
+        copy_text(g_gallery_runtime.virtual_directory,
+                  g_gallery_selection.virtual_directory, MAX_PATH);
+        for (i = 0; i < g_gallery_selection.count; i++) {
             copy_text(g_gallery_runtime.paths[i], g_gallery_selection.paths[i], MAX_PATH);
+            g_gallery_runtime.locators[i] = g_gallery_selection.locators[i];
+        }
         changed = 1;
     }
     gallery_selection_unlock();
@@ -1601,7 +1656,7 @@ static void gallery_page_set_stretched(JNIEnv* env, GalleryPage* page, int stret
 }
 
 static int gallery_page_load(JNIEnv* env, GalleryPage* page,
-                             const char* path, int stretched) {
+                             int index, int stretched) {
     jobject note;
     jobject note_global;
     jclass view_cls;
@@ -1609,7 +1664,8 @@ static int gallery_page_load(JNIEnv* env, GalleryPage* page,
     int frames = 0;
     int interval = 0;
     gallery_page_set_empty(env, page);
-    note = gallery_parse_note(env, path, &frames, &interval);
+    if (!gallery_materialize(index)) return 0;
+    note = gallery_parse_note(env, g_gallery_runtime.paths[index], &frames, &interval);
     if (!note) return 0;
     note_global = (*env)->NewGlobalRef(env, note);
     if (!note_global) {
@@ -2166,10 +2222,10 @@ static void gallery_refresh_neighbors(JNIEnv* env) {
     if (g_gallery_runtime.list_matches_note) {
         if (g_gallery_runtime.current > 0)
             gallery_page_load(env, &g_gallery_runtime.previous,
-                              g_gallery_runtime.paths[g_gallery_runtime.current - 1], stretched);
+                              g_gallery_runtime.current - 1, stretched);
         if (g_gallery_runtime.current + 1 < g_gallery_runtime.count)
             gallery_page_load(env, &g_gallery_runtime.next,
-                              g_gallery_runtime.paths[g_gallery_runtime.current + 1], stretched);
+                              g_gallery_runtime.current + 1, stretched);
     }
     g_gallery_runtime.last_stretched = stretched;
     g_gallery_runtime.touching = 0;
@@ -2191,6 +2247,8 @@ static int gallery_load_main_file(JNIEnv* env, jobject activity, int index) {
     jboolean was_playing = JNI_FALSE;
     int old_index = g_gallery_runtime.current;
     if (index < 0 || index >= g_gallery_runtime.count) return 0;
+    /* A ZIP-backed page must exist as a file before the player opens it. */
+    if (!gallery_materialize(index)) return 0;
     cls = (*env)->GetObjectClass(env, activity);
     playing_field = cls ? (*env)->GetFieldID(env, cls, "playing", "Z") : 0;
     load_file = cls ? (*env)->GetMethodID(env, cls, "loadSelectedFile",

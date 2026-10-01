@@ -1,8 +1,10 @@
 Buildreferenz: reference/base-v1.4.11.apk
 APK SHA256: 291e62d997cefec2a5fef16cf3dcbd942f213cb77cd7b2baab4b539ccee2da90
 Die ursprünglichen Java-Methodenkörper und Ressourcen werden aus dieser APK übernommen.
-Zusätzlich erzeugt: BrowserActivity (normaler API-7-Activity-Einstieg und API-9+-Router).
-Neu kompiliert: native Browserbibliotheken für fünf ABIs.
-Bisherige Java-Methodenkörper: 167, Instruktionen nach Tabellenverweis-Neunummerierung identisch.
-Version 1.4.12 / versionCode 28 / minSdk 7 / targetSdk 28.
+DEX-Erzeugung wie 1.4.12 (tools/patch-dex-v1412.py): BrowserActivity-Brücke, 167 Player-Methodenkörper
+mit identischen Instruktionen. classes.dex von 1.4.14 ist byteidentisch mit 1.4.12 und 1.4.13
+(SHA256 76f25ab1a9aae5c3d687b1315cf2b1b402afb0d15f8f4806a8efe0638ff8e018).
+Neu kompiliert: native Browserbibliotheken für fünf ABIs mit ZIP-Modul (native/zip_archive.inc),
+seit 1.4.14 mit 64-Bit-Dateipositionen (open/lseek64/read).
+Version 1.4.14 / versionCode 30 / minSdk 7 / targetSdk 28.
 Dieses Paket ist kein vollständiger Gradle-Java-Quellbaum des ursprünglichen Players.

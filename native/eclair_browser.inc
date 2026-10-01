@@ -120,6 +120,8 @@ void Java_de_offlineflipnote_legacy_BrowserActivity_onCreate(JNIEnv* env, jobjec
     b->state.running = 1; b->state.paused = 1; b->state.redraw = 1;
     (*env)->SetLongField(env, self, eclair_handle_field(env,self), (jlong)(size_t)b);
     browser_read_preferences(&b->state, env);
+    browser_read_cache_dir(&b->state, env);
+    zip_cache_wipe_if_fresh(b->state.cache_root);
     gallery_take_browser_return_request(&b->state);
     gallery_read_browser_return_extras(&b->activity, &b->state);
     image_class = (*env)->FindClass(env, "android/widget/ImageView");
@@ -189,6 +191,9 @@ void Java_de_offlineflipnote_legacy_BrowserActivity_run(JNIEnv* env, jobject sel
     h = (*env)->CallIntMethod(env,b->image,geth);
     if (eclair_resize(env,b,w,h)) {
         if (!b->started) { b->started=1; choose_start_directory(&b->state); }
+        if (b->state.directory_dirty) {
+            b->state.directory_dirty=0; browser_save_last_directory(&b->state,env);
+        }
         if (b->state.trim_requested) {
             b->state.trim_requested=0; free_thumbnails(&b->state); b->state.redraw=1;
         }
@@ -279,6 +284,7 @@ void Java_de_offlineflipnote_legacy_BrowserActivity_onDestroy(JNIEnv* env,jobjec
     if(b) {
         b->resumed=0; eclair_unschedule(env,self,b);
         free_thumbnails(&b->state);
+        if(b->state.zip) zip_archive_free(b->state.zip);
         if(b->pixels) (*env)->DeleteGlobalRef(env,b->pixels);
         if(b->bitmap) (*env)->DeleteGlobalRef(env,b->bitmap);
         if(b->image) (*env)->DeleteGlobalRef(env,b->image);
