@@ -8,6 +8,8 @@
  *
  * Since v1.4.13 ZIP archives are browsed like folders (zip_archive.inc),
  * up to 1000 entries per folder are listed and the last folder is restored.
+ * Since v1.4.15 uncaught Java exceptions are written to a crash log
+ * (crash_log.inc) before the app closes.
  */
 #include <jni.h>
 #include <stdint.h>
@@ -2267,3 +2269,4 @@ void ANativeActivity_onCreate(ANativeActivity* activity, void* savedState, size_
 }
 
 #include "eclair_browser.inc"
+#include "crash_log.inc"

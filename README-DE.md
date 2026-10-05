@@ -1,9 +1,45 @@
-# Flipnote Legacy Player 1.4.14 – ZIP-Archive im Flipnote-Browser
+# Flipnote Legacy Player 1.4.15 – Absturz unter Android 2.3 bis 4.4 behoben
 
-Testausgabe auf Grundlage von Version 1.4.13. Der Java-Player und die
-DEX-Datei sind weiterhin byteidentisch mit 1.4.12; alle Änderungen liegen im
-nativen Browser (`native/flipbrowser.c`, `native/zip_archive.inc`). Ein
-physischer Gerätetest dieser Ausgabe wurde hier nicht durchgeführt.
+Testausgabe auf Grundlage von Version 1.4.14. Ein physischer Gerätetest dieser
+Ausgabe wurde hier nicht durchgeführt.
+
+## Neu in 1.4.15
+
+- **Wiedergabe unter Android 2.3 bis 4.4 (Dalvik).** Seit Version 1.4.3 hat
+  der Audio-Mixer `PpmAudioMixer.mix()` einen Befehl, der einen `int`-Wert
+  ohne Umwandlung als `short` in den Tonpuffer schreibt (`aput-short` ohne
+  `int-to-short`). Die ART-Laufzeit ab Android 5 lässt das zu, die ältere
+  Dalvik-Laufzeit lehnt die Klasse bei der Prüfung ab. Sobald eine Flipnote
+  **mit Ton** gestartet wurde (auch die eingebaute Demo), warf Android einen
+  `java.lang.VerifyError`, den der Player nicht abfängt – die App schloss
+  sich. Der Flipnote-Browser war nicht betroffen, weil er keinen Ton ausgibt;
+  Flipnotes ohne Ton und stummgeschaltete Wiedergabe liefen. 1.4.15 setzt die
+  fehlende Umwandlung ein (der Wert ist dort bereits auf -32768..32767
+  begrenzt, der Ton ändert sich nicht). Alle anderen Methoden des Players sind
+  unverändert.
+- **Positionsabfrage abgesichert.** 1.3.2 fing bei `getPlaybackHeadPosition()`
+  einen Fehler des Audiosystems ab, 1.4.x nicht mehr. Wenn der Audio-Thread
+  die Tonspur am Ende freigibt, während die Oberfläche gerade die Position
+  liest, konnte das die App beenden. Der Schutz ist wieder da (Position 0
+  statt Ausnahme).
+- **Absturzprotokoll.** Ein nicht abgefangener Java-Fehler wird vor dem
+  Schließen der App in `Flipnote-Absturz.txt` im Hauptordner des externen
+  Speichers geschrieben (bei alten Geräten die SD-Karte, z. B.
+  `/mnt/sdcard/Flipnote-Absturz.txt`; Ersatz: App-Cache). Die Datei enthält
+  Android-Version, Gerät, Thread und den Stacktrace und wächst bei weiteren
+  Abstürzen an (ab 256 KB wird neu begonnen). Danach erscheint wie gewohnt die
+  Android-Meldung, dass die App beendet wurde. Keine neue Berechtigung, kein
+  Internet.
+- Werkzeuge: `tools/dalvik_verify_check.py` prüft ein DEX auf genau die
+  Verengungsregeln, die Dalvik strenger auslegt als ART;
+  `tests/test_dalvik_verifier.py` lässt den Test bei jedem Lauf gegen das
+  gebaute DEX laufen und erwartet im 1.4.14-DEX den einen bekannten Fehler.
+  Die Prüfung ist Teil von `tools/validate-v1415.py`.
+
+Betroffen von dem Fehler waren alle Ausgaben 1.4.3 bis 1.4.14 auf Geräten mit
+Dalvik (Android 2.3, 3.x, 4.0 bis 4.4). Auf Android 5 und neuer gab es kein
+sichtbares Problem; dort ändert 1.4.15 am Verhalten nichts außer dem
+Absturzprotokoll.
 
 ## Neu in 1.4.14
 
@@ -81,22 +117,24 @@ Vollbildpfade. Siehe README der Version 1.4.12 für Details.
 ## Installation
 
 Paket: de.offlineflipnote.legacy
-Version: 1.4.14
-Versionscode: 30
+Version: 1.4.15
+Versionscode: 31
 minSdk: 7
 targetSdk: 28 (unverändert)
 
 Die beigelegte Test-APK ist **unsigniert** und kann so nicht installiert
 werden. Sie ist mit dem Zertifikat der bisherigen Update-Reihe zu signieren
-(siehe Bauen); dann ist sie als direktes Update über 1.4.12/1.4.13 vorgesehen, ohne
+(siehe Bauen); dann ist sie als direktes Update über 1.4.12 bis 1.4.14 vorgesehen, ohne
 vorherige Deinstallation. Es wurden keine Berechtigungen ergänzt. Kein
 Internet, keine Telemetrie, keine Werbung und kein Export.
 
 ## Umfang dieses Quellpakets
 
-Nativer Quellcode (Browser, ZIP-Modul, Galerie-Pager), Java-Quelltext der
-kleinen BrowserActivity, DEX-/Manifest-Werkzeuge, Tests und die Referenz-APK
-1.4.11, aus der der bestehende Java-Player übernommen wird. Es handelt sich
+Nativer Quellcode (Browser, ZIP-Modul, Galerie-Pager, Absturzprotokoll),
+Java-Quelltext der kleinen BrowserActivity und der CrashLog-Klasse (beide
+werden als DEX-Klassen mit nativen Methoden erzeugt), DEX-/Manifest-Werkzeuge
+einschließlich des Bytecode-Patchers `tools/dalvik_patch.py`, Tests und die
+Referenz-APK 1.4.11, aus der der bestehende Java-Player übernommen wird. Es handelt sich
 nicht um einen vollständigen, aus ursprünglichem Java-Quelltext neu
 kompilierten Gradle-Build. Die Link-Stubs unter native/fake dienen nur der
 Importprüfung beim Linken; sie werden nicht in die APK aufgenommen.
@@ -118,8 +156,9 @@ SANITIZE=1 sh tests/run-host-tests.sh          # mit Clang-Sanitizer-Laufzeit
 CLANG=gcc SANITIZE=1 sh tests/run-host-tests.sh  # alternativ mit GCC
 sh tests/run-controls-test.sh
 sh tests/run-jni-host-test.sh
-python3 tools/validate-v1414.py /tmp/player-signed.apk
-python3 tools/validate-v1414.py /tmp/player-unsigned.apk --unsigned
+python3 tools/validate-v1415.py /tmp/player-signed.apk
+python3 tools/validate-v1415.py /tmp/player-unsigned.apk --unsigned
+python3 tools/dalvik_verify_check.py build/classes-v1.4.15.dex
 ```
 
 Die Freigabeprüfung erwartet das öffentliche Zertifikat der bisherigen
@@ -146,6 +185,12 @@ API-7/8-Pfad zusätzlich durch einen ZIP-Ordner mit Entpacken nach
 `getCacheDir()`. Er ersetzt keine echte Android-/Dalvik-/ART-Laufzeit.
 
 ## Technische Referenzen
+
+- Dalvik-Bytecode-Verifizierer (CodeVerify, canConvertTo1nr) im AOSP-Zweig
+  android-2.3.7_r1: dalvik/vm/analysis/CodeVerify.c
+- ART-Verifizierer, VerifyPrimitivePut (akzeptiert jeden Integer-Typ):
+  art/runtime/verifier/method_verifier.cc
+- Dalvik-Bytecode-Format: https://source.android.com/docs/core/runtime/dalvik-bytecode
 
 - ZIP-Dateiformat (APPNOTE): https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
 - 32-Bit-ABI und off64_t/lseek64 in Bionic: https://android.googlesource.com/platform/bionic/+/master/docs/32-bit-abi.md

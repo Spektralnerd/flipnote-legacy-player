@@ -1,93 +1,114 @@
-Flipnote Legacy Player 1.4.14 – technischer Prüfbericht
-Stand: 1. Oktober 2026
+Flipnote Legacy Player 1.4.15 – technischer Prüfbericht
+Stand: 5. Oktober 2026
 
-APK: Flipnote-Legacy-Player-v1.4.14-ZIP-Browser-Test.apk (UNSIGNIERT)
-Bytes: 259982
-SHA-256: 60b44c2a91c9e5fef4fe9bf2c79f0e58ec97904c756ead20166e87fc4ee2bbdd
+APK: Flipnote-Legacy-Player-v1.4.15-Dalvik-Fix-Test.apk (UNSIGNIERT)
+Bytes: 270659
+SHA-256: 300636040edcdf9bcd08f179b0cb41ee7ff255d009bb17da8881c2f9d05240d3
 Paket: de.offlineflipnote.legacy
-Version: 1.4.14 / Versionscode 30
+Version: 1.4.15 / Versionscode 31
 Mindest-API: 7 (Android 2.1), Ziel-API: 28 (unverändert)
-classes.dex SHA-256: 76f25ab1a9aae5c3d687b1315cf2b1b402afb0d15f8f4806a8efe0638ff8e018
-  (byteidentisch mit den APKs 1.4.12 und 1.4.13; kein Java-Code geändert)
+classes.dex SHA-256: 645269eac2cf343dc8e10a15c0b7f0ce610d939d6620f2ad20cbcef6a9000de9
+  (erstmals seit 1.4.12 geändert, siehe unten)
 Signatur: keine. Die APK muss mit dem Zertifikat der Update-Reihe
   (SHA-256 88:DD:F1:34:...:C3:90:A6) über build-release.sh signiert werden.
 
 ANLASS
-Auf dem Gerät scheiterte 1.4.13 an einem Google-Drive-Archiv von
-2.149.517.606 Byte (2 GiB + 2 MB) mit "ZIP NICHT LESBAR ODER ZU GROSS
-(MAX 2 GB)". Ursache war die eigene 31-Bit-Grenze des ZIP-Moduls, das die
-Datei über fseek/ftell (32-Bit-long auf 32-Bit-Android) ansprach.
+Auf einem Android-2.3-Gerät schloss sich 1.4.14 beim Abspielen (Demo und
+ausgewählte Flipnotes), während der Flipnote-Browser mit animierten Vorschauen
+lief und Version 1.3.2 auf demselben Gerät funktionierte.
+
+URSACHE
+Vergleich der DEX-Dateien 1.3.2 (Compiler-Ausgabe) und 1.4.3 bis 1.4.14: Von
+den geänderten Methoden enthält PpmAudioMixer.mix() seit 1.4.3 an Offset 140
+die Anweisung "aput-short v2, v12, v7", wobei v2 aus einer add-int-Rechnung
+stammt (Typ Integer). Der Dalvik-Verifizierer (Android 2.3-4.4,
+CodeVerify canConvertTo1nr) erlaubt für aput-short nur Register vom Typ
+Short oder enger; der ART-Verifizierer (Android 5+) akzeptiert jeden
+ganzzahligen Typ. Dalvik verwirft deshalb die Klasse PpmAudioMixer bei der
+Prüfung; "new PpmAudioMixer(...)" in PpmAudioEngine.play() wirft
+java.lang.VerifyError, ein Error und keine RuntimeException, den der Player
+nicht abfängt. Wiedergabe mit Ton beendet so die App; Browser, Laden der
+Datei und Standbild sind nicht betroffen. 1.3.2 schrieb an derselben Stelle
+"int-to-short" vor "aput-short" (Compiler-Ausgabe) und lief.
 
 UMGESETZT
-- ZIP-Modul auf 64-Bit-Dateipositionen umgestellt: Lesen über open, lseek64
-  und read (eigene kleine Schicht BigFile); Zentralverzeichnis, lokale
-  Header, Stored- und Deflate-Daten werden mit int64-Offsets adressiert.
-  lseek64/off64_t sind laut Bionic-Dokumentation seit API 3 vorhanden,
-  open() setzt in Bionic O_LARGEFILE selbst; zusätzlich wird O_LARGEFILE
-  auf 32-Bit-ARM/x86 explizit übergeben. Keine 64-Bit-Division, daher
-  weiterhin keine __aeabi_-Laufzeithelfer auf ARMv5.
-- ZIP64 vollständig: Eintragszahl, Zentralverzeichnis-Offset und lokale
-  Header-Offsets über 4 GB. Eintragsgrößen bleiben 32-Bit (Einträge > 16 MB
-  werden ohnehin nicht geöffnet); größere Werte gelten als nicht unterstützt.
-- Kachel ".." wird vor dem Öffnen eines Archivs angelegt und bleibt bei einem
-  Fehler erhalten. Neue Meldung "ZIP NICHT LESBAR - KEIN ZIP ODER DEFEKT".
-- Mini-Font: Glyphen für "/" und "\" waren vertauscht; korrigiert.
-- Manifest: nur versionName 1.4.14 und versionCode 30 gegenüber 1.4.12/1.4.13.
+- tools/patch-dex-v1415.py (auf der 1.4.12-Brücke aufbauend):
+  * PpmAudioMixer.mix(): "int-to-short v2, v2" vor dem aput-short eingefügt;
+    zwei Sprünge, die über die Einfügestelle hinweggehen, angepasst. Der Wert
+    ist an dieser Stelle bereits auf -32768..32767 begrenzt, die Umwandlung
+    ändert keine Abtastwerte.
+  * PpmAudioEngine.positionOf(): try/catch RuntimeException um
+    getPlaybackHeadPosition()/unsignedHead() wie in 1.3.2 (Handler am
+    Methodenende: move-exception, Position 0, Rücksprung). Schützt die
+    Oberfläche vor einer IllegalStateException, wenn der Audio-Thread die
+    Tonspur am Wiedergabeende bereits freigegeben hat.
+  * Neue DEX-Klasse CrashLog implements Thread.UncaughtExceptionHandler mit
+    Konstruktor und nativer uncaughtException(Thread, Throwable).
+  * Alle übrigen 165 Methodenkörper und die BrowserActivity-Brücke bleiben
+    nach Neunummerierung instruktionsgleich (im Patch geprüft).
+- native/crash_log.inc: JNI_OnLoad installiert CrashLog als Standard-Handler
+  und merkt sich den bisherigen Android-Handler; uncaughtException schreibt
+  Kopfzeilen (Unix-Zeit, API, Release, Hersteller/Modell, ABI, Thread) und
+  Log.getStackTraceString() nach <externer Speicher>/Flipnote-Absturz.txt
+  (Ersatz: /data/data/de.offlineflipnote.legacy/cache/), hängt an und
+  beginnt ab 256 KB neu; danach wird der bisherige Handler aufgerufen, so
+  dass Android die App wie gewohnt beendet. Kein liblog, keine neue
+  Abhängigkeit, keine neue Berechtigung.
+- tools/dalvik_patch.py: Einfügen von Code-Einheiten mit Reparatur aller
+  relativen Sprünge, Switch-Tabellen, fill-array-data-Verweise und
+  try/catch-Bereiche; strukturvergleich (normalized) für die Prüfung.
+- tools/dalvik_verify_check.py: Modell der Dalvik-Verengungsregeln
+  (Konstanten nach Wert, boolesche and/or/xor mit Literal 0/1, cmp-Ergebnisse,
+  schmale Lade-/Umwandlungsbefehle) für aput/iput/sput, schmale Argumente und
+  Rückgaben. Ergebnis: 1.3.2 = 0 Befunde, 1.4.3 bis 1.4.14 = genau der eine
+  Befund in mix(), 1.4.15 = 0 Befunde.
+- Manifest: nur versionName 1.4.15 und versionCode 31 geändert.
 
 ERHALTUNG DES BESTEHENDEN PLAYERS
-classes.dex, resources.arsc, Icons und Demo-Flipnote sind byteidentisch mit
-1.4.12. Geändert sind ausschließlich die fünf nativen Bibliotheken und zwei
-Byte plus ein String im Manifest.
+165 von 167 Methodenkörpern instruktionsgleich mit 1.4.11/1.4.12; mix() und
+positionOf() wie oben beschrieben erweitert; Registerzahlen, Parameterzahlen,
+outs-Größen und Zugriffseigenschaften aller Methoden unverändert. Ressourcen,
+Icons und Demo-Flipnote byteidentisch mit 1.4.12.
 
 TATSÄCHLICH AUSGEFÜHRTE PRÜFUNGEN
 Umgebung: Ubuntu 24.04, clang 18.1.3 + LLD 18.1.3, gcc 13.3.0, OpenJDK 21,
 Python 3.11. Kein Android-Gerät, kein Emulator.
-- Cross-Build für ARMv5 (armeabi), ARMv7, x86, ARM64 und x86-64; 95-109 KB.
-- ELF-Prüfung: feste Abhängigkeiten nur libc.so und libdl.so; kein libz.so,
-  kein libandroid.so; keine ungelösten ANative-/AInput-/AMotion-/AKey-Symbole
-  und keine __aeabi_-Helfer. Neue libc-Importe gegenüber 1.4.13 genau: open,
-  close, read, lseek64. Keine fseeko/ftello/pread64 (erst ab API 12/24).
-- Zweiter vollständiger Build in derselben Umgebung: byteidentische APK.
-- tools/validate-v1414.py --unsigned: Manifest, Komponenten, DEX 035 mit
-  sortierten Tabellen und SHA1/Adler32, Exporte, Importliste und Markerstrings
-  in allen 5 ABIs, ZIP-Alignment.
-- Alle Host-Regressionstests bestanden (23 PASS-Zeilen), Controls-
-  Test (5 PASS) und JNI-Host-Test für API 7 und API 8 (je 3 PASS, inklusive
-  des ZIP-Ablaufs auf dem Android-2.1-Pfad).
-- ZIP-Host-Test (tests/host_zip_test.c, 5274 Prüfungen), mit clang -O2 und
-  mit gcc -fsanitize=address,undefined inklusive Leak-Erkennung, jeweils mit
-  -D_FILE_OFFSET_BITS=64:
-  * Alle Prüfungen aus 1.4.13 (Namensnormalisierung, virtuelle Pfade,
-    Zentralverzeichnis, Inflate-Roundtrips bei Stufe 0/1/6/9 und Stored in
-    jeder Präfixlänge, CRC-/Größen-/Offset-/Flag-Fehler, Listen, Vorschauen,
-    Cache mit LRU, 1000er-Grenze, Ordner-Merken, 1150 beschädigte Archive).
-  * Neu: Archiv von 2.150.058.439 Byte (Vorspann-Eintrag von 2,15 GB als
-    Loch einer Sparse-Datei, PPM-Einträge dahinter bei Offsets > 2^31, 32-Bit-
-    Endeblock wie bei Google-Drive-Archiven) und Archiv von 4.400.058.591
-    Byte (ZIP64-Größen, -Offsets und -Endeblock, PPM-Einträge bei Offsets
-    > 2^32): Index, Dateigröße, vollständiges Entpacken mit CRC gegen das
-    Original, Vorschaubild aus den ersten 1696 Byte, Ordnerlisten, Vorschau
-    im Browser und Extraktion in den Cache. Beide Archive wurden zusätzlich
-    mit Pythons zipfile unabhängig gelesen (Eintragsliste, Entpacken).
-  * Fehlerfall: nicht lesbares Archiv behält die Kachel "..".
-- Hostmessung unverändert: ca. 60 MB/s Inflate-Ausgabe bei Textdaten.
+- DEX-Vergleich 1.3.2 gegen 1.4.14 (Klassen, Methoden, Referenzen,
+  Instruktionsfolgen) zur Eingrenzung der seit 1.3.2 geänderten Methoden;
+  Handdurchsicht der handgeschriebenen Methoden (mix, stream, positionOf,
+  getLivePosition, access$400, MainActivity$13.onClick) auf Dalvik-Regeln
+  (Registertypen an Zusammenführungen, Wide-Paare, Float/Int, invoke-Arten).
+- Prüfung aller invoke-Arten gegen die Methodenarten eigener Klassen: keine
+  Abweichung.
+- Cross-Build für ARMv5, ARMv7, x86, ARM64, x86-64 (100-114 KB); feste
+  Abhängigkeiten nur libc.so/libdl.so; keine neuen Importe; JNI_OnLoad und
+  Java_de_offlineflipnote_legacy_CrashLog_uncaughtException exportiert.
+- Zweiter vollständiger Build: byteidentische APK.
+- tools/validate-v1415.py --unsigned: Manifest, Komponenten, DEX 035 mit
+  sortierten Tabellen und SHA1/Adler32, Dalvik-Verengungsprüfung, Vorhandensein
+  der mix()-Umwandlung, des positionOf()-Handlers und der CrashLog-Klasse,
+  Exporte und Markerstrings in allen 5 ABIs, ZIP-Alignment.
+- Host-Regressionstests (24 PASS/OK-Zeilen inklusive ZIP-Test mit 5274
+  Prüfungen und neuem Dalvik-Test), auch unter gcc AddressSanitizer/UBSan;
+  Controls-Test; JNI-Host-Test für API 7 und 8 mit neuem Abschnitt: Laden der
+  Bibliothek installiert CrashLog als Standard-Handler, ein ausgelöster Fehler
+  erzeugt die Protokolldatei mit Kopfzeilen und Stacktrace, ein zweiter wird
+  angehängt.
 
 NICHT GEPRÜFT / EINSCHRÄNKUNGEN
-Kein Start und keine Installation auf einem physischen Android-Gerät; kein
-Emulator. Der 64-Bit-Pfad wurde auf einem 64-Bit-Host geprüft; ein 32-Bit-
-Hostlauf war mangels 32-Bit-libc nicht möglich. Die Aussagen zu lseek64 (API 3)
-und O_LARGEFILE in open() stützen sich auf die Bionic-Dokumentation
-(docs/32-bit-abi.md) und den Bionic-Quelltext von open.c, nicht auf einen
-Gerätetest. Die APK ist unsigniert. Die Sanitizer-Läufe liefen mit GCC
-(CLANG=gcc SANITIZE=1). Verschlüsselte, bzip2-/LZMA-Einträge und Einzeleinträge
-über 16 MB bleiben unbenutzbar. Die Infoansicht des Players zeigt bei
-Archiveinträgen den Pfad der Cache-Kopie.
+Kein Start auf einem physischen Android-Gerät, kein Dalvik-Lauf; die
+Diagnose stützt sich auf die Bytecode-Analyse und die bekannten
+Verifiziererregeln, nicht auf ein Geräteprotokoll. Nicht abgefangene native
+Fehler (SIGSEGV) erscheinen nicht im Absturzprotokoll, nur Java-Fehler. Auf
+Android 11 und neuer kann das Schreiben auf den externen Speicher scheitern;
+dann liegt die Datei im App-Cache. Die APK ist unsigniert. Sollte das
+2.3-Gerät nach dem Update beim bloßen Antippen einer Flipnote im Browser
+(ohne Wiedergabe) weiterhin schließen, enthält Flipnote-Absturz.txt den
+Grund.
 
 TEST AUF DEM GERÄT
-APK signieren und über 1.4.13 installieren. Das 2-GB-Archiv aus Documents
-öffnen: Die Kachel "ZIP-ARCHIV" soll die Ordner des Archivs zeigen, Vorschauen
-und Abspielen wie bei kleinen Archiven. Auf Android 2.1 (32-Bit) ist derselbe
-Test mit einem Archiv über 2 GB der entscheidende Nachweis für lseek64.
-Pfadzeile prüfen: "/storage/emulated/0/..." muss jetzt mit Schrägstrichen
-erscheinen. Eine Nicht-ZIP-Datei mit Endung .zip antippen: Meldung in der
-Fußzeile und Kachel ".." zum Zurückgehen.
+APK signieren und über 1.4.14 installieren. Auf dem Android-2.3-Gerät: App
+starten, Demo mit Play abspielen (Bild und Ton). Danach über den Browser eine
+Flipnote mit Ton und eine ohne Ton öffnen und abspielen, Wischen zu Nachbarn,
+Zurück in den Browser. Falls die App dennoch schließt: Flipnote-Absturz.txt
+von der SD-Karte (oder aus dem App-Cache) sichern und mitschicken.

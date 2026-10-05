@@ -7,6 +7,21 @@ public class BridgeTest {
  public static void main(String[] args) throws Exception {
   Build.VERSION.SDK_INT=args.length>1?Integer.parseInt(args[1]):7;
   Context.resetPreferences();
+  // v1.4.15: loading the library installs CrashLog as the default handler.
+  Class.forName("de.offlineflipnote.legacy.BrowserActivity"); // triggers System.loadLibrary
+  Thread.UncaughtExceptionHandler installed=Thread.getDefaultUncaughtExceptionHandler();
+  check(installed instanceof CrashLog,"JNI_OnLoad installed CrashLog as default handler");
+  Thread.setDefaultUncaughtExceptionHandler(null); // keep JVM test failures visible
+  java.io.File crashFile=new java.io.File(System.getProperty("flipnote.external"),"Flipnote-Absturz.txt");
+  crashFile.delete();
+  installed.uncaughtException(Thread.currentThread(),new IllegalStateException("Testabsturz 4711"));
+  String report=new String(java.nio.file.Files.readAllBytes(crashFile.toPath()),"UTF-8");
+  check(report.contains("Absturz")&&report.contains("Testabsturz 4711")&&report.contains("IllegalStateException"),"crash report written: "+report);
+  check(report.contains("Android API: "+Build.VERSION.SDK_INT)&&report.contains("Desktop-JVM")&&report.contains("Thread: main"),"crash report header: "+report);
+  installed.uncaughtException(Thread.currentThread(),new RuntimeException("zweiter"));
+  String twice=new String(java.nio.file.Files.readAllBytes(crashFile.toPath()),"UTF-8");
+  check(twice.indexOf("==== Flipnote")!=twice.lastIndexOf("==== Flipnote")&&twice.contains("zweiter"),"second crash appended");
+  System.out.println("PASS crash log: default handler installed on load, report with device header and stack trace, appends");
   BrowserActivity a=new BrowserActivity();
   a.intent.putExtra("flipnote.browser.return.directory",args[0]);
   a.intent.putExtra("flipnote.browser.return.path",args[0]+"/synthetic-test.ppm");

@@ -1,10 +1,12 @@
 Buildreferenz: reference/base-v1.4.11.apk
 APK SHA256: 291e62d997cefec2a5fef16cf3dcbd942f213cb77cd7b2baab4b539ccee2da90
 Die ursprünglichen Java-Methodenkörper und Ressourcen werden aus dieser APK übernommen.
-DEX-Erzeugung wie 1.4.12 (tools/patch-dex-v1412.py): BrowserActivity-Brücke, 167 Player-Methodenkörper
-mit identischen Instruktionen. classes.dex von 1.4.14 ist byteidentisch mit 1.4.12 und 1.4.13
-(SHA256 76f25ab1a9aae5c3d687b1315cf2b1b402afb0d15f8f4806a8efe0638ff8e018).
-Neu kompiliert: native Browserbibliotheken für fünf ABIs mit ZIP-Modul (native/zip_archive.inc),
-seit 1.4.14 mit 64-Bit-Dateipositionen (open/lseek64/read).
-Version 1.4.14 / versionCode 30 / minSdk 7 / targetSdk 28.
+DEX-Erzeugung: tools/patch-dex-v1415.py = BrowserActivity-Brücke aus 1.4.12 + Dalvik-Korrektur.
+Von den 167 Player-Methodenkörpern sind 165 instruktionsgleich mit 1.4.11; geändert sind
+PpmAudioMixer.mix (ein eingefügtes int-to-short vor aput-short, zwei angepasste Sprungweiten)
+und PpmAudioEngine.positionOf (try/catch RuntimeException wie in 1.3.2, Handler am Methodenende).
+Neu: Klasse CrashLog (Konstruktor + native uncaughtException).
+classes.dex SHA256 (1.4.15): 645269eac2cf343dc8e10a15c0b7f0ce610d939d6620f2ad20cbcef6a9000de9
+Neu kompiliert: native Browserbibliotheken für fünf ABIs (ZIP-Modul, Absturzprotokoll, JNI_OnLoad).
+Version 1.4.15 / versionCode 31 / minSdk 7 / targetSdk 28.
 Dieses Paket ist kein vollständiger Gradle-Java-Quellbaum des ursprünglichen Players.

@@ -58,3 +58,4 @@ python3 "$ROOT/tests/test_immersive_fullscreen.py"
 
 python3 "$ROOT/tests/test_edge_to_edge_cutout.py"
 python3 "$ROOT/tests/test_zip_browser.py"
+python3 "$ROOT/tests/test_dalvik_verifier.py"
