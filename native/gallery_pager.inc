@@ -10,10 +10,26 @@
  * behaviour. Two ordinary PpmPlayerView instances render the silent previous
  * and next pages while the user drags. A HorizontalScrollView supplies a
  * clipping viewport which also works on Android 2.3 / API 9.
+ *
+ * Per-tick cost (v1.4.16): the UI ticker asks tickDelayMillis() how long to
+ * wait. Gingerbread-class hardware (API < 14 or an ARMv5/ARMv6 build of this
+ * library) gets the 40 ms of version 1.3.2 while idle, everything else keeps
+ * 16 ms; drags and settle animations always run at 16 ms. The neighbour
+ * pages only animate while they can be seen, JNI method and field IDs are
+ * looked up once, and the seek-bar repair runs at most every 250 ms.
  */
 #define GALLERY_SWIPE_THRESHOLD_MIN 48
 #define GALLERY_SWIPE_THRESHOLD_MAX 220
 #define GALLERY_SETTLE_MS 180
+#define GALLERY_TICK_FAST_MS 16
+#define GALLERY_TICK_SLOW_MS 40
+#define GALLERY_SLOW_DEVICE_MAX_SDK 13
+#define GALLERY_SEEKBAR_REPAIR_INTERVAL_MS 250u
+#if defined(__arm__) && defined(__ARM_ARCH) && __ARM_ARCH < 7
+#define GALLERY_SLOW_ABI_BUILD 1   /* the "armeabi" library: ARMv5/ARMv6 phones */
+#else
+#define GALLERY_SLOW_ABI_BUILD 0
+#endif
 #define GALLERY_ZOOM_MIN 1000
 #define GALLERY_ZOOM_MAX 8000
 #define GALLERY_ZOOM_DOUBLE 2000
@@ -98,6 +114,15 @@ typedef struct GalleryRuntime {
     int zoom_label_milli;
     int external_intent_checked;
     int center_pending;
+    uint32_t seekbar_repair_checked_ms;
+    int seekbar_repair_checked;
+
+    /* MainActivity.noteName is compared against the selection only when the
+       String object or the selection changes (v1.4.16). */
+    jobject note_name_identity;
+    int note_name_generation;
+    int note_name_found;
+    int note_name_cached;
 
     int immersive_sdk;
     int immersive_applied;
@@ -299,6 +324,59 @@ static jmethodID gallery_optional_static_method(
     if (!method) gallery_clear_exception(env);
     return method;
 }
+
+/* Method and field IDs stay valid for as long as the class is loaded, which
+   in this app is the lifetime of the process. Every per-tick call site keeps
+   its ID in a static slot, so Dalvik no longer walks the Activity hierarchy
+   by name sixty times per second (v1.4.16). A slot is always used with the
+   same kind of receiver (MainActivity, SeekBar, HorizontalScrollView,
+   FrameLayout page, PpmPlayerView). */
+typedef struct GalleryMethodSlot {
+    jmethodID id;
+    int tried;
+} GalleryMethodSlot;
+
+typedef struct GalleryFieldSlot {
+    jfieldID id;
+    int tried;
+} GalleryFieldSlot;
+
+static jmethodID gallery_method(JNIEnv* env, GalleryMethodSlot* slot, jobject receiver,
+                                const char* name, const char* signature) {
+    jclass cls;
+    if (slot->tried) return slot->id;
+    if (!receiver) return 0;
+    slot->tried = 1;
+    cls = (*env)->GetObjectClass(env, receiver);
+    slot->id = cls ? (*env)->GetMethodID(env, cls, name, signature) : 0;
+    if (!slot->id) gallery_clear_exception(env);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return slot->id;
+}
+
+static jfieldID gallery_field(JNIEnv* env, GalleryFieldSlot* slot, jobject receiver,
+                              const char* name, const char* signature) {
+    jclass cls;
+    if (slot->tried) return slot->id;
+    if (!receiver) return 0;
+    slot->tried = 1;
+    cls = (*env)->GetObjectClass(env, receiver);
+    slot->id = cls ? (*env)->GetFieldID(env, cls, name, signature) : 0;
+    if (!slot->id) gallery_clear_exception(env);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return slot->id;
+}
+
+static GalleryMethodSlot g_id_activity_has_window_focus;
+static GalleryMethodSlot g_id_pager_get_width;
+static GalleryMethodSlot g_id_pager_scroll_to;
+static GalleryMethodSlot g_id_pager_get_scroll_x;
+static GalleryMethodSlot g_id_page_get_height;
+static GalleryMethodSlot g_id_player_is_stretched;
+static GalleryMethodSlot g_id_player_show_frame;
+static GalleryFieldSlot g_id_activity_note;
+static GalleryFieldSlot g_id_activity_note_name;
+static GalleryFieldSlot g_id_activity_controls_visible;
 
 static int gallery_android_sdk(JNIEnv* env) {
     jclass version_cls = 0;
@@ -577,12 +655,9 @@ done:
 }
 
 static int gallery_activity_has_window_focus(JNIEnv* env, jobject activity) {
-    jclass activity_cls = 0;
-    jmethodID has_focus = 0;
+    jmethodID has_focus = gallery_method(env, &g_id_activity_has_window_focus,
+            activity, "hasWindowFocus", "()Z");
     jboolean focused = JNI_FALSE;
-    activity_cls = (*env)->GetObjectClass(env, activity);
-    has_focus = gallery_optional_method(env, activity_cls,
-            "hasWindowFocus", "()Z");
     if (has_focus) {
         focused = (*env)->CallBooleanMethod(env, activity, has_focus);
         if ((*env)->ExceptionCheck(env)) {
@@ -590,7 +665,6 @@ static int gallery_activity_has_window_focus(JNIEnv* env, jobject activity) {
             focused = JNI_FALSE;
         }
     }
-    if (activity_cls) (*env)->DeleteLocalRef(env, activity_cls);
     return focused == JNI_TRUE;
 }
 
@@ -794,6 +868,7 @@ static void gallery_runtime_release(JNIEnv* env) {
     gallery_delete_global(env, &g_gallery_runtime.info_button);
     gallery_delete_global(env, &g_gallery_runtime.seek_bar);
     gallery_delete_global(env, &g_gallery_runtime.note_identity);
+    gallery_delete_global(env, &g_gallery_runtime.note_name_identity);
     gallery_delete_global(env, &g_gallery_runtime.current_layout);
     gallery_delete_global(env, &g_gallery_runtime.current_view);
     gallery_delete_global(env, &g_gallery_runtime.current_page);
@@ -1055,13 +1130,11 @@ static void gallery_zoom_cycle(JNIEnv* env) {
 }
 
 static void gallery_zoom_sync_note(JNIEnv* env, jobject activity) {
-    jclass activity_cls;
     jfieldID note_field;
     jobject note = 0;
     int changed = 0;
-    activity_cls = (*env)->GetObjectClass(env, activity);
-    note_field = activity_cls ? (*env)->GetFieldID(env, activity_cls,
-            "note", "Lde/offlineflipnote/legacy/PpmFile;") : 0;
+    note_field = gallery_field(env, &g_id_activity_note, activity,
+            "note", "Lde/offlineflipnote/legacy/PpmFile;");
     if (note_field) note = (*env)->GetObjectField(env, activity, note_field);
     if ((*env)->ExceptionCheck(env)) {
         gallery_clear_exception(env);
@@ -1078,7 +1151,6 @@ static void gallery_zoom_sync_note(JNIEnv* env, jobject activity) {
         gallery_zoom_reset(env, 1);
     }
     if (note) (*env)->DeleteLocalRef(env, note);
-    if (activity_cls) (*env)->DeleteLocalRef(env, activity_cls);
     gallery_clear_exception(env);
 }
 
@@ -1454,16 +1526,14 @@ static jobject gallery_parse_note(JNIEnv* env, const char* path,
 }
 
 static int gallery_current_stretched(JNIEnv* env) {
-    jclass view_cls;
     jmethodID method;
     jboolean result = 0;
     if (!g_gallery_runtime.current_view) return 0;
-    view_cls = (*env)->GetObjectClass(env, g_gallery_runtime.current_view);
-    method = view_cls ? (*env)->GetMethodID(env, view_cls, "isStretched", "()Z") : 0;
+    method = gallery_method(env, &g_id_player_is_stretched,
+            g_gallery_runtime.current_view, "isStretched", "()Z");
     if (method) result = (*env)->CallBooleanMethod(env,
             g_gallery_runtime.current_view, method);
     gallery_clear_exception(env);
-    if (view_cls) (*env)->DeleteLocalRef(env, view_cls);
     return result ? 1 : 0;
 }
 
@@ -1483,18 +1553,16 @@ static void gallery_set_button_visibility(
 }
 
 static void gallery_update_overlay_buttons(JNIEnv* env, jobject activity) {
-    jclass activity_cls;
     jfieldID controls_field, note_field;
     jboolean controls_visible = JNI_FALSE;
     jobject note = 0;
     int back_visible;
     int zoom_visible;
     int info_visible;
-    activity_cls = (*env)->GetObjectClass(env, activity);
-    controls_field = activity_cls ? (*env)->GetFieldID(env, activity_cls,
-            "controlsVisible", "Z") : 0;
-    note_field = activity_cls ? (*env)->GetFieldID(env, activity_cls,
-            "note", "Lde/offlineflipnote/legacy/PpmFile;") : 0;
+    controls_field = gallery_field(env, &g_id_activity_controls_visible, activity,
+            "controlsVisible", "Z");
+    note_field = gallery_field(env, &g_id_activity_note, activity,
+            "note", "Lde/offlineflipnote/legacy/PpmFile;");
     if (controls_field)
         controls_visible = (*env)->GetBooleanField(env, activity, controls_field);
     if (note_field) note = (*env)->GetObjectField(env, activity, note_field);
@@ -1510,7 +1578,6 @@ static void gallery_update_overlay_buttons(JNIEnv* env, jobject activity) {
                                   info_visible, &g_gallery_runtime.info_visible);
     gallery_zoom_update_button_label(env);
     if (note) (*env)->DeleteLocalRef(env, note);
-    if (activity_cls) (*env)->DeleteLocalRef(env, activity_cls);
 }
 
 
@@ -1519,7 +1586,9 @@ static void gallery_update_overlay_buttons(JNIEnv* env, jobject activity) {
    reparent during the first layout pass can leave this one sibling at
    GONE/zero height even though the rest of the control menu is visible. The
    original SeekBar and its Java listener are retained; this only restores its
-   visibility and the original 24-dp layout height. */
+   visibility and the original 24-dp layout height. Since v1.4.16 the check
+   runs at most every GALLERY_SEEKBAR_REPAIR_INTERVAL_MS instead of on every
+   UI tick; on Android 2.3 the eleven JNI lookups per tick were measurable. */
 static void gallery_repair_seekbar(JNIEnv* env, jobject activity) {
     jclass activity_cls = 0;
     jfieldID controls_field = 0;
@@ -1545,8 +1614,16 @@ static void gallery_repair_seekbar(JNIEnv* env, jobject activity) {
     jint layout_height = 0;
     jint desired_height = 24;
     int changed = 0;
+    uint32_t now;
 
     if (!g_gallery_runtime.seek_bar) return;
+    now = monotonicish_millis();
+    if (g_gallery_runtime.seekbar_repair_checked
+            && now - g_gallery_runtime.seekbar_repair_checked_ms
+                    < GALLERY_SEEKBAR_REPAIR_INTERVAL_MS)
+        return;
+    g_gallery_runtime.seekbar_repair_checked = 1;
+    g_gallery_runtime.seekbar_repair_checked_ms = now;
     activity_cls = (*env)->GetObjectClass(env, activity);
     controls_field = activity_cls ? (*env)->GetFieldID(env, activity_cls,
             "controlsVisible", "Z") : 0;
@@ -1705,16 +1782,13 @@ static int gallery_page_load(JNIEnv* env, GalleryPage* page,
 
 static void gallery_page_advance(JNIEnv* env, GalleryPage* page, uint32_t now) {
     int steps = 0;
-    jclass view_cls;
     jmethodID show_frame;
     if (!page->valid || !page->view || page->frame_count <= 1) return;
     if ((int32_t)(now - page->next_due_ms) > 1000)
         page->next_due_ms = now;
-    view_cls = (*env)->GetObjectClass(env, page->view);
-    show_frame = view_cls ? (*env)->GetMethodID(env, view_cls, "showFrame", "(I)V") : 0;
+    if (!time_reached(now, page->next_due_ms)) return;
+    show_frame = gallery_method(env, &g_id_player_show_frame, page->view, "showFrame", "(I)V");
     if (!show_frame) {
-        gallery_clear_exception(env);
-        if (view_cls) (*env)->DeleteLocalRef(env, view_cls);
         page->valid = 0;
         return;
     }
@@ -1732,30 +1806,37 @@ static void gallery_page_advance(JNIEnv* env, GalleryPage* page, uint32_t now) {
     }
     if (steps >= MAX_CATCHUP_FRAMES && time_reached(now, page->next_due_ms))
         page->next_due_ms = now + (uint32_t)page->frame_interval_ms;
-    (*env)->DeleteLocalRef(env, view_cls);
+}
+
+/* The neighbour pages are fully covered by the centre page unless the user
+   drags the pager, a settle animation runs or the centre scroll is still
+   pending after a layout. Decoding frames for covered pages costs the same
+   as the visible playback on Android 2.3-class phones (v1.4.16). */
+static int gallery_neighbors_visible(void) {
+    if (g_gallery_runtime.settling || g_gallery_runtime.center_pending) return 1;
+    if (g_gallery_runtime.touching
+            && (g_gallery_runtime.horizontal_drag || g_gallery_runtime.drag_x != 0))
+        return 1;
+    return 0;
 }
 
 static void gallery_scroll_to(JNIEnv* env, int x) {
-    jclass cls;
     jmethodID method;
     if (!g_gallery_runtime.pager) return;
-    cls = (*env)->GetObjectClass(env, g_gallery_runtime.pager);
-    method = cls ? (*env)->GetMethodID(env, cls, "scrollTo", "(II)V") : 0;
+    method = gallery_method(env, &g_id_pager_scroll_to, g_gallery_runtime.pager,
+            "scrollTo", "(II)V");
     if (method) (*env)->CallVoidMethod(env, g_gallery_runtime.pager, method, x, 0);
     gallery_clear_exception(env);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
 }
 
 static int gallery_scroll_x(JNIEnv* env) {
-    jclass cls;
     jmethodID method;
     jint value = 0;
     if (!g_gallery_runtime.pager) return 0;
-    cls = (*env)->GetObjectClass(env, g_gallery_runtime.pager);
-    method = cls ? (*env)->GetMethodID(env, cls, "getScrollX", "()I") : 0;
+    method = gallery_method(env, &g_id_pager_get_scroll_x, g_gallery_runtime.pager,
+            "getScrollX", "()I");
     if (method) value = (*env)->CallIntMethod(env, g_gallery_runtime.pager, method);
     gallery_clear_exception(env);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
     return value;
 }
 
@@ -1780,8 +1861,6 @@ static void gallery_set_view_width(JNIEnv* env, jobject view, int width) {
 }
 
 static int gallery_update_page_width(JNIEnv* env) {
-    jclass pager_cls = 0;
-    jclass page_cls = 0;
     jmethodID get_width = 0;
     jmethodID get_height = 0;
     jint width = 0;
@@ -1789,15 +1868,13 @@ static int gallery_update_page_width(JNIEnv* env) {
     int width_changed;
     int height_changed;
     if (!g_gallery_runtime.pager || !g_gallery_runtime.current_page) return 0;
-    pager_cls = (*env)->GetObjectClass(env, g_gallery_runtime.pager);
-    page_cls = (*env)->GetObjectClass(env, g_gallery_runtime.current_page);
-    get_width = pager_cls ? (*env)->GetMethodID(env, pager_cls, "getWidth", "()I") : 0;
-    get_height = page_cls ? (*env)->GetMethodID(env, page_cls, "getHeight", "()I") : 0;
+    get_width = gallery_method(env, &g_id_pager_get_width, g_gallery_runtime.pager,
+            "getWidth", "()I");
+    get_height = gallery_method(env, &g_id_page_get_height, g_gallery_runtime.current_page,
+            "getHeight", "()I");
     if (get_width) width = (*env)->CallIntMethod(env, g_gallery_runtime.pager, get_width);
     if (get_height) height = (*env)->CallIntMethod(env, g_gallery_runtime.current_page, get_height);
     gallery_clear_exception(env);
-    if (page_cls) (*env)->DeleteLocalRef(env, page_cls);
-    if (pager_cls) (*env)->DeleteLocalRef(env, pager_cls);
     if (width <= 0) return 0;
     if (height <= 0) height = g_gallery_runtime.page_height;
     width_changed = width != g_gallery_runtime.page_width;
@@ -2188,16 +2265,26 @@ done:
 }
 
 static int gallery_find_current_from_note_name(JNIEnv* env, jobject activity) {
-    jclass cls;
     jfieldID field;
     jstring name_obj;
     const char* name;
     int found = -1;
+    int same_string;
     int i;
-    cls = (*env)->GetObjectClass(env, activity);
-    field = cls ? (*env)->GetFieldID(env, cls, "noteName", "Ljava/lang/String;") : 0;
+    field = gallery_field(env, &g_id_activity_note_name, activity,
+            "noteName", "Ljava/lang/String;");
     name_obj = field ? (jstring)(*env)->GetObjectField(env, activity, field) : 0;
     if ((*env)->ExceptionCheck(env)) { gallery_clear_exception(env); name_obj = 0; }
+    /* The player assigns a new String per loaded note; while the same object
+       and the same selection are in place the previous answer still holds. */
+    same_string = (!name_obj && !g_gallery_runtime.note_name_identity)
+            || (name_obj && g_gallery_runtime.note_name_identity
+                && (*env)->IsSameObject(env, name_obj, g_gallery_runtime.note_name_identity));
+    if (g_gallery_runtime.note_name_cached && same_string
+            && g_gallery_runtime.note_name_generation == g_gallery_runtime.generation) {
+        if (name_obj) (*env)->DeleteLocalRef(env, name_obj);
+        return g_gallery_runtime.note_name_found;
+    }
     name = name_obj ? (*env)->GetStringUTFChars(env, name_obj, 0) : 0;
     if (name) {
         for (i = 0; i < g_gallery_runtime.count; i++) {
@@ -2208,8 +2295,13 @@ static int gallery_find_current_from_note_name(JNIEnv* env, jobject activity) {
         }
         (*env)->ReleaseStringUTFChars(env, name_obj, name);
     }
+    gallery_delete_global(env, &g_gallery_runtime.note_name_identity);
+    if (name_obj) g_gallery_runtime.note_name_identity = (*env)->NewGlobalRef(env, name_obj);
+    gallery_clear_exception(env);
+    g_gallery_runtime.note_name_cached = !name_obj || g_gallery_runtime.note_name_identity != 0;
+    g_gallery_runtime.note_name_generation = g_gallery_runtime.generation;
+    g_gallery_runtime.note_name_found = found;
     if (name_obj) (*env)->DeleteLocalRef(env, name_obj);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
     return found;
 }
 
@@ -2508,8 +2600,33 @@ void Java_de_offlineflipnote_legacy_MainActivity_galleryTick(JNIEnv* env, jobjec
 
     now = monotonicish_millis();
     gallery_tick_settle(env, activity, now);
-    gallery_page_advance(env, &g_gallery_runtime.previous, now);
-    gallery_page_advance(env, &g_gallery_runtime.next, now);
+    if (gallery_neighbors_visible()) {
+        gallery_page_advance(env, &g_gallery_runtime.previous, now);
+        gallery_page_advance(env, &g_gallery_runtime.next, now);
+    }
+}
+
+/* Idle tick interval of the Java UI ticker (MainActivity$1.run), v1.4.16.
+   Version 1.3.2 ticked every 40 ms and ran smoothly on a Galaxy Ace
+   (Android 2.3, ARMv6); 1.4.x used 16 ms everywhere. Each tick costs two
+   String.format() calls, a relayout of the time label and this module's
+   checks, which that class of hardware cannot afford sixty times a second. */
+static int gallery_device_is_slow(JNIEnv* env) {
+    if (GALLERY_SLOW_ABI_BUILD) return 1;
+    return gallery_android_sdk(env) <= GALLERY_SLOW_DEVICE_MAX_SDK;
+}
+
+static jlong gallery_tick_delay_millis(JNIEnv* env) {
+    if (g_gallery_runtime.settling || g_gallery_runtime.touching
+            || g_gallery_runtime.center_pending)
+        return GALLERY_TICK_FAST_MS;
+    return gallery_device_is_slow(env) ? GALLERY_TICK_SLOW_MS : GALLERY_TICK_FAST_MS;
+}
+
+__attribute__((visibility("default")))
+jlong Java_de_offlineflipnote_legacy_MainActivity_tickDelayMillis(JNIEnv* env, jclass cls) {
+    (void)cls;
+    return gallery_tick_delay_millis(env);
 }
 
 /* MainActivity implements View.OnTouchListener in the patched DEX. */

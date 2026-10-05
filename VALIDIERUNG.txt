@@ -1,114 +1,135 @@
-Flipnote Legacy Player 1.4.15 – technischer Prüfbericht
+Flipnote Legacy Player 1.4.16 – technischer Prüfbericht
 Stand: 5. Oktober 2026
 
-APK: Flipnote-Legacy-Player-v1.4.15-Dalvik-Fix-Test.apk (UNSIGNIERT)
-Bytes: 270659
-SHA-256: 300636040edcdf9bcd08f179b0cb41ee7ff255d009bb17da8881c2f9d05240d3
+APK: Flipnote-Legacy-Player-v1.4.16-Gingerbread-Performance-Test.apk (UNSIGNIERT)
+Bytes: 280278
+SHA-256: afbf224925d3e43adb83dc1351c1ac1e2be9306dbeda445147515e18aea42cbd
 Paket: de.offlineflipnote.legacy
-Version: 1.4.15 / Versionscode 31
+Version: 1.4.16 / Versionscode 32
 Mindest-API: 7 (Android 2.1), Ziel-API: 28 (unverändert)
-classes.dex SHA-256: 645269eac2cf343dc8e10a15c0b7f0ce610d939d6620f2ad20cbcef6a9000de9
-  (erstmals seit 1.4.12 geändert, siehe unten)
+classes.dex SHA-256: 1a38875348bc80f5c0ca1fbf56facf891d51e48d30d1ba8ed39781222752f844
 Signatur: keine. Die APK muss mit dem Zertifikat der Update-Reihe
   (SHA-256 88:DD:F1:34:...:C3:90:A6) über build-release.sh signiert werden.
 
 ANLASS
-Auf einem Android-2.3-Gerät schloss sich 1.4.14 beim Abspielen (Demo und
-ausgewählte Flipnotes), während der Flipnote-Browser mit animierten Vorschauen
-lief und Version 1.3.2 auf demselben Gerät funktionierte.
+Samsung Galaxy Ace GT-S5830 (Android 2.3, ARMv6, ein Kern, 320x480): 1.4.15
+spielt ab, ruckelt aber stark. Version 1.3.2 lief auf demselben Gerät sauber.
 
-URSACHE
-Vergleich der DEX-Dateien 1.3.2 (Compiler-Ausgabe) und 1.4.3 bis 1.4.14: Von
-den geänderten Methoden enthält PpmAudioMixer.mix() seit 1.4.3 an Offset 140
-die Anweisung "aput-short v2, v12, v7", wobei v2 aus einer add-int-Rechnung
-stammt (Typ Integer). Der Dalvik-Verifizierer (Android 2.3-4.4,
-CodeVerify canConvertTo1nr) erlaubt für aput-short nur Register vom Typ
-Short oder enger; der ART-Verifizierer (Android 5+) akzeptiert jeden
-ganzzahligen Typ. Dalvik verwirft deshalb die Klasse PpmAudioMixer bei der
-Prüfung; "new PpmAudioMixer(...)" in PpmAudioEngine.play() wirft
-java.lang.VerifyError, ein Error und keine RuntimeException, den der Player
-nicht abfängt. Wiedergabe mit Ton beendet so die App; Browser, Laden der
-Datei und Standbild sind nicht betroffen. 1.3.2 schrieb an derselben Stelle
-"int-to-short" vor "aput-short" (Compiler-Ausgabe) und lief.
+BEFUND (Bytecode- und Quellvergleich 1.3.2 gegen 1.4.15, kein Geräteprofil)
+Der Java-Player ist in beiden Versionen bis auf wenige Methoden identisch
+(149 der 166 Methodenkörper von 1.3.2 sind in 1.4.15 symbolisch gleich; der
+Rest: Browser-Brücke, Demo/Datei-Tasten, Geschwindigkeit, Farben, Mixer).
+Unterschiede mit laufenden Kosten:
+1. MainActivity$1.run: Ticker 16 ms (1.4.x) statt 40 ms (1.3.2). Pro Tick:
+   getLivePosition(), showPosition() mit zwei String.format()-Aufrufen
+   (millisekundengenaue Zeit, also jedes Mal neuer Text), TextView.setText()
+   mit Neulayout, SeekBar.setProgress().
+2. galleryTick() (seit 1.4.x): pro Tick ca. 40 GetMethodID/GetFieldID-
+   Lookups per Name über die Activity-Klassenhierarchie, Stringvergleich des
+   Dateinamens mit bis zu 1000 Listeneinträgen, elf Lookups für die
+   Suchleisten-Prüfung, zwei stumme Nachbarseiten mit vollständiger
+   Bilddekodierung (Java, 256x192, zwei Ebenen) obwohl verdeckt.
+3. PpmAudioMixer.mix (handgeschrieben seit 1.4.3): pro Ausgabesample ein
+   Math.floor()-Aufruf (JNI) und drei lowerBound()-Binärsuchen, 32768-mal pro
+   Sekunde, auf dem Audio-Thread mit Priorität -16 (URGENT_AUDIO). 1.3.2
+   berechnete Effekte je Ereignis statt je Sample.
 
 UMGESETZT
-- tools/patch-dex-v1415.py (auf der 1.4.12-Brücke aufbauend):
-  * PpmAudioMixer.mix(): "int-to-short v2, v2" vor dem aput-short eingefügt;
-    zwei Sprünge, die über die Einfügestelle hinweggehen, angepasst. Der Wert
-    ist an dieser Stelle bereits auf -32768..32767 begrenzt, die Umwandlung
-    ändert keine Abtastwerte.
-  * PpmAudioEngine.positionOf(): try/catch RuntimeException um
-    getPlaybackHeadPosition()/unsignedHead() wie in 1.3.2 (Handler am
-    Methodenende: move-exception, Position 0, Rücksprung). Schützt die
-    Oberfläche vor einer IllegalStateException, wenn der Audio-Thread die
-    Tonspur am Wiedergabeende bereits freigegeben hat.
-  * Neue DEX-Klasse CrashLog implements Thread.UncaughtExceptionHandler mit
-    Konstruktor und nativer uncaughtException(Thread, Throwable).
-  * Alle übrigen 165 Methodenkörper und die BrowserActivity-Brücke bleiben
-    nach Neunummerierung instruktionsgleich (im Patch geprüft).
-- native/crash_log.inc: JNI_OnLoad installiert CrashLog als Standard-Handler
-  und merkt sich den bisherigen Android-Handler; uncaughtException schreibt
-  Kopfzeilen (Unix-Zeit, API, Release, Hersteller/Modell, ABI, Thread) und
-  Log.getStackTraceString() nach <externer Speicher>/Flipnote-Absturz.txt
-  (Ersatz: /data/data/de.offlineflipnote.legacy/cache/), hängt an und
-  beginnt ab 256 KB neu; danach wird der bisherige Handler aufgerufen, so
-  dass Android die App wie gewohnt beendet. Kein liblog, keine neue
-  Abhängigkeit, keine neue Berechtigung.
-- tools/dalvik_patch.py: Einfügen von Code-Einheiten mit Reparatur aller
-  relativen Sprünge, Switch-Tabellen, fill-array-data-Verweise und
-  try/catch-Bereiche; strukturvergleich (normalized) für die Prüfung.
-- tools/dalvik_verify_check.py: Modell der Dalvik-Verengungsregeln
-  (Konstanten nach Wert, boolesche and/or/xor mit Literal 0/1, cmp-Ergebnisse,
-  schmale Lade-/Umwandlungsbefehle) für aput/iput/sput, schmale Argumente und
-  Rückgaben. Ergebnis: 1.3.2 = 0 Befunde, 1.4.3 bis 1.4.14 = genau der eine
-  Befund in mix(), 1.4.15 = 0 Befunde.
-- Manifest: nur versionName 1.4.15 und versionCode 31 geändert.
+- native/gallery_pager.inc:
+  * tickDelayMillis(): 40 ms Ruhe-Takt, wenn SDK_INT <= 13 oder die
+    Bibliothek die ARMv5/ARMv6-Variante ("armeabi", Compile-Zeit-Makro
+    __ARM_ARCH < 7) ist; sonst 16 ms. Während touching/settling/
+    center_pending immer 16 ms.
+  * gallery_neighbors_visible(): Nachbarseiten werden nur weitergeschaltet
+    bei Einrastanimation, horizontalem Ziehen oder ausstehender Zentrierung.
+    Der vorhandene Uhrenabgleich (>1 s Rückstand -> neu aufsetzen) verhindert
+    einen Nachhol-Burst beim Sichtbarwerden.
+  * GalleryMethodSlot/GalleryFieldSlot: IDs je Aufrufstelle einmal ermittelt
+    (hasWindowFocus, getWidth, getHeight, scrollTo, getScrollX, isStretched,
+    showFrame, Felder note, noteName, controlsVisible). noteName wird nur bei
+    geändertem String-Objekt oder geänderter Auswahl erneut verglichen.
+  * gallery_repair_seekbar(): höchstens alle 250 ms.
+- native/audio_mixer.inc (neu): Java_de_offlineflipnote_legacy_PpmAudioMixer_mix.
+  Ganzzahlarithmetik: Position Q4, Geschwindigkeit Q12 wie bisher; BGM-
+  Schritt bgmSourceRate/OUTPUT_SAMPLE_RATE als 24.40-Festkomma aus den
+  IEEE-754-Bits des double (eigene 64/32-Division mit konstanten Schiebern,
+  kein libgcc/compiler-rt); Index = floor(sample*step/2^40) exakt in 64-Bit-
+  Teilen; Effekte: lowerBound wie in Java, Halbierung und Begrenzung nach
+  jeder Addition in derselben Reihenfolge; Nullen von offset bis Pufferende
+  wie Arrays.fill() der Java-Fassung. Ungültige Bereiche (offset/count) und
+  Raten (NaN, inf, negativ, > 4 MHz) werden ohne Ausnahme behandelt.
+- tools/patch-dex-v1416.py (auf 1.4.15 aufbauend): mix() -> public native
+  ohne Code; MainActivity.tickDelayMillis()J public static native;
+  MainActivity$1.run: const-wide/16 v1,#16 -> invoke-static {} tickDelayMillis;
+  move-result-wide v1 (Registerzahl 4, outs 4 unverändert). Alle übrigen 169
+  Methodenkörper nach Neunummerierung instruktionsgleich (im Patch geprüft).
+- Manifest: nur versionName 1.4.16 und versionCode 32.
+- tools/validate-v1416.py: zusätzlich mix() nativ ohne Code, tickDelayMillis
+  vorhanden und im Ticker aufgerufen, kein const-wide/16 #16 mehr, Exporte
+  Java_..._PpmAudioMixer_mix und Java_..._MainActivity_tickDelayMillis in
+  allen fünf ABIs, keine Importe von libm/compiler-rt (floor, __aeabi_d*,
+  __udiv*, __ashl* ...), Markerstrings bgmSourceRate/OUTPUT_SAMPLE_RATE/
+  hasWindowFocus/noteName.
 
 ERHALTUNG DES BESTEHENDEN PLAYERS
-165 von 167 Methodenkörpern instruktionsgleich mit 1.4.11/1.4.12; mix() und
-positionOf() wie oben beschrieben erweitert; Registerzahlen, Parameterzahlen,
-outs-Größen und Zugriffseigenschaften aller Methoden unverändert. Ressourcen,
-Icons und Demo-Flipnote byteidentisch mit 1.4.12.
+164 von 167 Methodenkörpern instruktionsgleich mit 1.4.11; positionOf() wie
+in 1.4.15; MainActivity$1.run und PpmAudioMixer.mix wie oben; Ressourcen,
+Icons und Demo-Flipnote byteidentisch mit 1.4.12. Der Ton ist Sample für
+Sample derselbe wie mit dem Java-Mixer von 1.4.15 (siehe Tests).
 
 TATSÄCHLICH AUSGEFÜHRTE PRÜFUNGEN
 Umgebung: Ubuntu 24.04, clang 18.1.3 + LLD 18.1.3, gcc 13.3.0, OpenJDK 21,
-Python 3.11. Kein Android-Gerät, kein Emulator.
-- DEX-Vergleich 1.3.2 gegen 1.4.14 (Klassen, Methoden, Referenzen,
-  Instruktionsfolgen) zur Eingrenzung der seit 1.3.2 geänderten Methoden;
-  Handdurchsicht der handgeschriebenen Methoden (mix, stream, positionOf,
-  getLivePosition, access$400, MainActivity$13.onClick) auf Dalvik-Regeln
-  (Registertypen an Zusammenführungen, Wide-Paare, Float/Int, invoke-Arten).
-- Prüfung aller invoke-Arten gegen die Methodenarten eigener Klassen: keine
-  Abweichung.
-- Cross-Build für ARMv5, ARMv7, x86, ARM64, x86-64 (100-114 KB); feste
-  Abhängigkeiten nur libc.so/libdl.so; keine neuen Importe; JNI_OnLoad und
-  Java_de_offlineflipnote_legacy_CrashLog_uncaughtException exportiert.
-- Zweiter vollständiger Build: byteidentische APK.
-- tools/validate-v1415.py --unsigned: Manifest, Komponenten, DEX 035 mit
-  sortierten Tabellen und SHA1/Adler32, Dalvik-Verengungsprüfung, Vorhandensein
-  der mix()-Umwandlung, des positionOf()-Handlers und der CrashLog-Klasse,
-  Exporte und Markerstrings in allen 5 ABIs, ZIP-Alignment.
-- Host-Regressionstests (24 PASS/OK-Zeilen inklusive ZIP-Test mit 5274
-  Prüfungen und neuem Dalvik-Test), auch unter gcc AddressSanitizer/UBSan;
-  Controls-Test; JNI-Host-Test für API 7 und 8 mit neuem Abschnitt: Laden der
-  Bibliothek installiert CrashLog als Standard-Handler, ein ausgelöster Fehler
-  erzeugt die Protokolldatei mit Kopfzeilen und Stacktrace, ein zweiter wird
-  angehängt.
+Python 3.13. Kein Android-Gerät, kein Emulator.
+- Symbolischer Methodenvergleich 1.3.2 gegen 1.4.15 (Disassembler über
+  dex_rewriter) zur Eingrenzung der Unterschiede; Durchsicht aller pro Tick
+  laufenden Funktionen in gallery_pager.inc.
+- Cross-Build für ARMv5 (soft-float), ARMv7, x86, ARM64, x86-64
+  (103-118 KB); feste Abhängigkeiten nur libc.so/libdl.so; keine neuen
+  Importe (__aeabi_idiv/uidiv sind wie bisher lokal definiert); neue Exporte
+  vorhanden.
+- Zweiter vollständiger Build und Clean-Room-Build aus dem gepackten
+  Quellpaket: byteidentische APK.
+- tools/validate-v1416.py --unsigned: Manifest, Komponenten, DEX 035 mit
+  sortierten Tabellen und SHA1/Adler32, Dalvik-Verengungsprüfung (0 Befunde),
+  positionOf-Handler, CrashLog, native mix(), tickDelayMillis im Ticker,
+  Exporte, Importverbote und Markerstrings in allen 5 ABIs, ZIP-Alignment.
+- Host-Regressionstests (37 PASS/OK-Zeilen) inklusive neuem
+  tests/host_mixer_test.c: 336 Zufallsblöcke (6 BGM-Raten, 7 Geschwindig-
+  keiten bis 0x7fffffff, Positionen bis 0xffffffff) identisch mit einer
+  Gleitkomma-Transkription der Java-Methode, Festkomma-Schritt und -Index
+  gegen floor() (0 Abweichungen), 2000 Divisionen gegen den Compiler,
+  Randfälle; 2874 Prüfungen. Gleicher Lauf unter gcc AddressSanitizer/UBSan
+  ohne Befund.
+- tests/test_gingerbread_performance.py: Strukturprüfung von Taktregel,
+  Nachbarseiten-Logik, ID-Slots (keine GetMethodID/GetFieldID mehr in den
+  Tick-Funktionen), Reparaturintervall, Ganzzahl-Mixer, DEX-Form von
+  mix()/tickDelayMillis()/MainActivity$1.run und Reihenfolge
+  updatePlaybackUi() vor galleryTick().
+- tests/test_dalvik_verifier.py: 1.4.16 und 1.4.15 ohne Befund, 1.4.14 mit
+  dem bekannten einen Befund.
+- Controls-Test (5 PASS). JNI-Host-Test (API 7 und 8 wie bisher, 8 PASS)
+  plus MixerTest in vier JVM-Läufen (SDK 10/13 -> 40 ms, 14/36 -> 16 ms):
+  je 216 Zufallsblöcke nativ gegen die Java-Referenz identisch, leere Spuren,
+  nur Effekte, nur BGM, ungültige Raten, Bereichsgrenzen (count über
+  Pufferende, offset -1/1000/1001, null-Puffer, negatives count) ohne
+  Ausnahme. Zeitmessung auf dem Host: nativ ca. 4-5x schneller als die
+  JIT-kompilierte Java-Referenz (auf Dalvik ohne Inlining ist der Abstand
+  erheblich größer).
 
 NICHT GEPRÜFT / EINSCHRÄNKUNGEN
-Kein Start auf einem physischen Android-Gerät, kein Dalvik-Lauf; die
-Diagnose stützt sich auf die Bytecode-Analyse und die bekannten
-Verifiziererregeln, nicht auf ein Geräteprotokoll. Nicht abgefangene native
-Fehler (SIGSEGV) erscheinen nicht im Absturzprotokoll, nur Java-Fehler. Auf
-Android 11 und neuer kann das Schreiben auf den externen Speicher scheitern;
-dann liegt die Datei im App-Cache. Die APK ist unsigniert. Sollte das
-2.3-Gerät nach dem Update beim bloßen Antippen einer Flipnote im Browser
-(ohne Wiedergabe) weiterhin schließen, enthält Flipnote-Absturz.txt den
-Grund.
+Kein Lauf auf einem physischen Android-Gerät, keine Messung auf dem
+GT-S5830; die Zuordnung der Ursachen stützt sich auf die Code-Analyse und
+die bekannte Dalvik-/Android-2.3-Architektur, nicht auf ein Profil. Die
+Wirkung der einzelnen Maßnahmen wurde nicht getrennt gemessen. Auf Geräten
+mit API 14 bis 20 und schwacher Hardware bleibt der 16-ms-Takt wie in 1.4.x.
+Die APK ist unsigniert. Sollte die Wiedergabe weiterhin ruckeln, bitte
+Rückmeldung mit Demo/Browser, Ton an/aus, Ordner/ZIP; ein Absturz steht in
+Flipnote-Absturz.txt.
 
 TEST AUF DEM GERÄT
-APK signieren und über 1.4.14 installieren. Auf dem Android-2.3-Gerät: App
-starten, Demo mit Play abspielen (Bild und Ton). Danach über den Browser eine
-Flipnote mit Ton und eine ohne Ton öffnen und abspielen, Wischen zu Nachbarn,
-Zurück in den Browser. Falls die App dennoch schließt: Flipnote-Absturz.txt
-von der SD-Karte (oder aus dem App-Cache) sichern und mitschicken.
+APK signieren und über 1.4.15 installieren. Auf dem Android-2.3-Gerät: Demo
+abspielen (Bild und Ton), eine Flipnote mit Ton und eine ohne Ton aus dem
+Browser öffnen, einige Sekunden laufen lassen, zu Nachbarn wischen (die
+Nachbarseite beginnt beim Ziehen zu laufen), Zurück in den Browser. Auf dem
+modernen Gerät zur Kontrolle: Wiedergabe, Wischen, Zoom und Suchleiste wie
+mit 1.4.15.

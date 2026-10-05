@@ -16,3 +16,8 @@ find "$ROOT/tests/jni-host" -name '*.java' > "$OUT/sources.txt"
 javac -d "$OUT/classes" @"$OUT/sources.txt"
 java -Djava.library.path="$OUT" -Dflipnote.external="$OUT" -cp "$OUT/classes" de.offlineflipnote.legacy.BridgeTest "$OUT/notes" 7
 java -Djava.library.path="$OUT" -Dflipnote.external="$OUT" -cp "$OUT/classes" de.offlineflipnote.legacy.BridgeTest "$OUT/notes" 8
+# v1.4.16: native mixer against the Java reference; idle tick interval by device class.
+java -Djava.library.path="$OUT" -cp "$OUT/classes" de.offlineflipnote.legacy.MixerTest 10 40
+java -Djava.library.path="$OUT" -cp "$OUT/classes" de.offlineflipnote.legacy.MixerTest 13 40
+java -Djava.library.path="$OUT" -cp "$OUT/classes" de.offlineflipnote.legacy.MixerTest 14 16
+java -Djava.library.path="$OUT" -cp "$OUT/classes" de.offlineflipnote.legacy.MixerTest 36 16

@@ -31,10 +31,15 @@ case "$CLANG" in *gcc*) FLAGS="$FLAGS -Wno-maybe-uninitialized" ;; esac
 # shellcheck disable=SC2086
 "$CLANG" $FLAGS -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
   "$ROOT/tests/host_zip_test.c" -Wl,--gc-sections -o "$OUT/zip-test"
+# v1.4.16: the native mixer against a double-precision oracle (libm only for the oracle).
+# shellcheck disable=SC2086
+"$CLANG" $FLAGS -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+  "$ROOT/tests/host_mixer_test.c" -Wl,--gc-sections -lm -o "$OUT/mixer-test"
 "$OUT/decoder-test" \
   "$ROOT/tests/data/synthetic-test.ppm" \
   "$ROOT/tests/data/translation-test.ppm"
 "$OUT/stress-test" "$ROOT/tests/data/synthetic-test.ppm"
+"$OUT/mixer-test"
 # ZIP archives as folders (v1.4.13): fixtures are generated, never committed.
 rm -rf "$OUT/zip-fixtures"
 python3 "$ROOT/tests/make_zip_fixtures.py" "$OUT/zip-fixtures" \
@@ -59,3 +64,4 @@ python3 "$ROOT/tests/test_immersive_fullscreen.py"
 python3 "$ROOT/tests/test_edge_to_edge_cutout.py"
 python3 "$ROOT/tests/test_zip_browser.py"
 python3 "$ROOT/tests/test_dalvik_verifier.py"
+python3 "$ROOT/tests/test_gingerbread_performance.py"

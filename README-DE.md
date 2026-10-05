@@ -1,7 +1,71 @@
-# Flipnote Legacy Player 1.4.15 – Absturz unter Android 2.3 bis 4.4 behoben
+# Flipnote Legacy Player 1.4.16 – flüssige Wiedergabe auf Android-2.3-Geräten
 
-Testausgabe auf Grundlage von Version 1.4.14. Ein physischer Gerätetest dieser
+Testausgabe auf Grundlage von Version 1.4.15. Ein physischer Gerätetest dieser
 Ausgabe wurde hier nicht durchgeführt.
+
+## Neu in 1.4.16
+
+Anlass: Auf einem Samsung Galaxy Ace (GT-S5830, Android 2.3, ARMv6 mit einem
+Kern) spielte 1.4.15 zwar wieder ab, aber mit starkem Ruckeln; Version 1.3.2
+lief auf demselben Gerät flüssig. Der Vergleich der beiden Versionen zeigt
+fünf Unterschiede, die bei jedem Bild bzw. jedem Tonblock Rechenzeit kosten.
+1.4.16 beseitigt alle fünf:
+
+1. **UI-Takt wieder 40 ms auf Gingerbread-Hardware.** Der Java-Player
+   aktualisiert Bild, Suchleiste und Zeitanzeige über einen `Handler`-Ticker.
+   1.3.2 lief mit 40 ms, 1.4.x mit 16 ms. Jeder Tick ruft zweimal
+   `String.format("%d:%02d.%03d", …)` auf (Zeit und Dauer, millisekundengenau)
+   und ändert damit den Text der Zeitanzeige, was ein Neulayout des gesamten
+   Fensters auslöst; auf einem ARM11 mit 800 MHz sind 60 solcher Durchläufe
+   pro Sekunde zu viel. Der Ticker fragt jetzt die native Bibliothek
+   (`MainActivity.tickDelayMillis()`): Auf Geräten mit Android ≤ 3.2 (API ≤ 13)
+   oder mit der ARMv5/ARMv6-Bibliothek (`armeabi`, also genau die Geräteklasse
+   des Galaxy Ace) beträgt der Ruhe-Takt 40 ms wie in 1.3.2; alle anderen
+   Geräte behalten 16 ms. Während eines Wischvorgangs und der
+   Einrastanimation gilt überall 16 ms, damit die Geste flüssig bleibt. Die
+   Bildwechsel richten sich wie bisher nach der Audio- bzw. Systemuhr; mit
+   40 ms Takt werden sie wie in 1.3.2 mit bis zu 40 ms Versatz angezeigt.
+2. **Audio-Mischung in C statt Java.** Der 1.4.x-Mixer berechnete pro
+   Ausgabesample (32768 pro Sekunde) einen `Math.floor()`-Aufruf und drei
+   Binärsuchen in Java, auf einem Thread mit `THREAD_PRIORITY_URGENT_AUDIO`,
+   der die Oberfläche auf einem Einkernprozessor verdrängt – geschätzt ein
+   Viertel der CPU. `PpmAudioMixer.mix()` ist jetzt eine native Methode
+   (`native/audio_mixer.inc`) mit derselben Arithmetik in Ganzzahlen: der
+   BGM-Schrittwert wird als 24.40-Festkomma aus den Bits des `double`
+   gewonnen, Begrenzung und Reihenfolge der Additionen sind identisch. Zwei
+   Tests vergleichen die native Ausgabe Sample für Sample mit der Java-Logik
+   von 1.4.15 (552 Zufallsblöcke, sechs BGM-Raten, sechs bis sieben Geschwindigkeiten,
+   leere Spuren, ungültige Raten, Randbereiche); der Ton ändert sich nicht.
+3. **Nachbarseiten laufen nur, wenn man sie sieht.** Die zwei stummen
+   Vorschau-Seiten links und rechts der aktuellen Flipnote dekodierten bisher
+   ständig Bilder (je 256×192 Pixel in Java), obwohl sie von der mittleren
+   Seite vollständig verdeckt sind – dreifacher Dekodieraufwand. Sie laufen
+   jetzt nur noch während des Ziehens, der Einrastanimation und bis zum
+   Zentrieren nach einem Layout. Gilt auf allen Geräten; sichtbar ist der
+   Unterschied nicht, weil verdeckte Seiten nicht gezeichnet werden.
+4. **JNI-Namenslookups nur noch einmal.** `galleryTick()` suchte bei jedem
+   Tick rund 40 Methoden und Felder per Namen (`GetMethodID`/`GetFieldID`),
+   was Dalvik durch Vergleich mit allen Methodennamen der Activity-Hierarchie
+   beantwortet. Die IDs werden jetzt je Aufrufstelle einmal ermittelt und
+   gemerkt; der Vergleich des Dateinamens mit der Auswahlliste erfolgt nur
+   noch, wenn sich Name oder Liste ändern.
+5. **Suchleisten-Reparatur höchstens alle 250 ms.** Die vorhandene Prüfung,
+   ob die Suchleiste nach dem Umhängen in den Pager unsichtbar geworden ist,
+   lief mit elf JNI-Aufrufen pro Tick; jetzt viermal pro Sekunde.
+
+Auf Android 5 und neuer ändert sich am sichtbaren Verhalten nichts
+(Punkte 3 bis 5 sparen dort nur Rechenzeit, Punkt 2 liefert identische
+Samples). Keine neue Berechtigung, kein neuer Import in der Bibliothek
+(weiterhin nur libc/libdl, keine libm, kein Gleitkomma im ARMv5-Build).
+
+### Test auf dem Galaxy Ace
+
+APK signieren, über 1.4.15 installieren. Demo mit Play abspielen (Bild und
+Ton). Über den Browser eine Flipnote mit Ton und eine ohne Ton öffnen, einige
+Sekunden laufen lassen, zu Nachbarn wischen, Zurück in den Browser. Erwartet:
+Wiedergabe wie mit 1.3.2. Falls es weiter ruckelt, bitte angeben, ob es die
+Demo betrifft, ob Ton an ist und ob die Flipnote aus einem Ordner oder einer
+ZIP stammt. Ein Absturz landet weiterhin in `Flipnote-Absturz.txt`.
 
 ## Neu in 1.4.15
 
@@ -117,24 +181,28 @@ Vollbildpfade. Siehe README der Version 1.4.12 für Details.
 ## Installation
 
 Paket: de.offlineflipnote.legacy
-Version: 1.4.15
-Versionscode: 31
+Version: 1.4.16
+Versionscode: 32
 minSdk: 7
 targetSdk: 28 (unverändert)
 
 Die beigelegte Test-APK ist **unsigniert** und kann so nicht installiert
 werden. Sie ist mit dem Zertifikat der bisherigen Update-Reihe zu signieren
-(siehe Bauen); dann ist sie als direktes Update über 1.4.12 bis 1.4.14 vorgesehen, ohne
+(siehe Bauen); dann ist sie als direktes Update über 1.4.12 bis 1.4.15 vorgesehen, ohne
 vorherige Deinstallation. Es wurden keine Berechtigungen ergänzt. Kein
 Internet, keine Telemetrie, keine Werbung und kein Export.
 
 ## Umfang dieses Quellpakets
 
-Nativer Quellcode (Browser, ZIP-Modul, Galerie-Pager, Absturzprotokoll),
-Java-Quelltext der kleinen BrowserActivity und der CrashLog-Klasse (beide
-werden als DEX-Klassen mit nativen Methoden erzeugt), DEX-/Manifest-Werkzeuge
-einschließlich des Bytecode-Patchers `tools/dalvik_patch.py`, Tests und die
-Referenz-APK 1.4.11, aus der der bestehende Java-Player übernommen wird. Es handelt sich
+Nativer Quellcode (Browser, ZIP-Modul, Galerie-Pager, Absturzprotokoll,
+Audio-Mixer), Java-Quelltext der kleinen BrowserActivity und der
+CrashLog-Klasse (beide werden als DEX-Klassen mit nativen Methoden erzeugt),
+DEX-/Manifest-Werkzeuge einschließlich des Bytecode-Patchers
+`tools/dalvik_patch.py`, Tests und die Referenz-APK 1.4.11, aus der der
+bestehende Java-Player übernommen wird. `tools/patch-dex-v1416.py` macht
+`PpmAudioMixer.mix()` zur nativen Methode und fügt `tickDelayMillis()` ein;
+`java/de/offlineflipnote/legacy/PpmAudioMixer-native.java` dokumentiert die
+Signatur. Es handelt sich
 nicht um einen vollständigen, aus ursprünglichem Java-Quelltext neu
 kompilierten Gradle-Build. Die Link-Stubs unter native/fake dienen nur der
 Importprüfung beim Linken; sie werden nicht in die APK aufgenommen.
@@ -156,9 +224,9 @@ SANITIZE=1 sh tests/run-host-tests.sh          # mit Clang-Sanitizer-Laufzeit
 CLANG=gcc SANITIZE=1 sh tests/run-host-tests.sh  # alternativ mit GCC
 sh tests/run-controls-test.sh
 sh tests/run-jni-host-test.sh
-python3 tools/validate-v1415.py /tmp/player-signed.apk
-python3 tools/validate-v1415.py /tmp/player-unsigned.apk --unsigned
-python3 tools/dalvik_verify_check.py build/classes-v1.4.15.dex
+python3 tools/validate-v1416.py /tmp/player-signed.apk
+python3 tools/validate-v1416.py /tmp/player-unsigned.apk --unsigned
+python3 tools/dalvik_verify_check.py build/classes-v1.4.16.dex
 ```
 
 Die Freigabeprüfung erwartet das öffentliche Zertifikat der bisherigen
@@ -177,7 +245,13 @@ unterstützte Verfahren, Vorspann, Kommentar, leer, defekt, 1200 Einträge,
 sowie zwei dünnbesetzte Archive von 2,15 GB und 4,4 GB mit ZIP64) und
 prüft Index, Entpacken gegen die Originaldaten in jeder Präfixlänge, CRC,
 Navigation, Vorschauen, Cache, das Abschneiden nach dem Sortieren, das
-Ordner-Merken und 1150 zufällig beschädigte Archive. Die großen Archive
+Ordner-Merken und 1150 zufällig beschädigte Archive.
+`tests/host_mixer_test.c` vergleicht den nativen Mixer mit einer
+Gleitkomma-Transkription der Java-Methode, `tests/jni-host/…/MixerTest.java`
+tut dasselbe über JNI aus einer Desktop-JVM heraus und prüft
+`tickDelayMillis()` für API 10, 13, 14 und 36;
+`tests/test_gingerbread_performance.py` sichert die Struktur der
+Takt-, Nachbarseiten- und ID-Cache-Änderungen im Quelltext und im DEX. Die großen Archive
 belegen als Sparse-Dateien nur wenige KB; auf Dateisystemen ohne
 Sparse-Unterstützung werden sie weggelassen (`FLIPNOTE_ZIP_BIG=0` schaltet
 sie ab). Der JNI-Test führt den
@@ -186,6 +260,9 @@ API-7/8-Pfad zusätzlich durch einen ZIP-Ordner mit Entpacken nach
 
 ## Technische Referenzen
 
+- Handler.postDelayed / UI-Thread-Ticker: https://developer.android.com/reference/android/os/Handler#postDelayed(java.lang.Runnable,%20long)
+- Process.THREAD_PRIORITY_URGENT_AUDIO: https://developer.android.com/reference/android/os/Process#THREAD_PRIORITY_URGENT_AUDIO
+- JNI-Tipps (IDs cachen, Get<Type>ArrayElements): https://developer.android.com/training/articles/perf-jni
 - Dalvik-Bytecode-Verifizierer (CodeVerify, canConvertTo1nr) im AOSP-Zweig
   android-2.3.7_r1: dalvik/vm/analysis/CodeVerify.c
 - ART-Verifizierer, VerifyPrimitivePut (akzeptiert jeden Integer-Typ):

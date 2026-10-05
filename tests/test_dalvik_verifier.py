@@ -16,15 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from dalvik_verify_check import check  # noqa: E402
 
-built = ROOT / "build" / "classes-v1.4.15.dex"
+built = ROOT / "build" / "classes-v1.4.16.dex"
 if not built.exists():
     base = ROOT / "build" / "base.dex"
+    base.parent.mkdir(exist_ok=True)
     with zipfile.ZipFile(ROOT / "reference" / "base-v1.4.11.apk") as z:
         base.write_bytes(z.read("classes.dex"))
-    subprocess.check_call([sys.executable, str(ROOT / "tools" / "patch-dex-v1415.py"), str(base), str(built)])
+    subprocess.check_call([sys.executable, str(ROOT / "tools" / "patch-dex-v1416.py"), str(base), str(built)])
 
 problems = check(built)
 assert problems == [], problems
+# The 1.4.15 stage (Java mixer with the inserted int-to-short) stays clean too.
+stage = ROOT / "build" / "classes-v1.4.15.dex"
+if not stage.exists():
+    subprocess.check_call([sys.executable, str(ROOT / "tools" / "patch-dex-v1415.py"), str(ROOT / "build" / "base.dex"), str(stage)])
+previous = check(stage)
+assert previous == [], previous
 
 reference = check(ROOT / "build" / "classes-v1.4.14.dex")
 assert len(reference) == 1 and "PpmAudioMixer;->mix" in reference[0] and "(short)" in reference[0], reference
@@ -35,4 +42,6 @@ from dex_rewriter import DexModel  # noqa: E402
 model = DexModel(built.read_bytes())
 names = {c.descriptor for c in model.classes}
 assert "Lde/offlineflipnote/legacy/CrashLog;" in names
-print("PASS: Dalvik narrowing check clean for 1.4.15; reference 1.4.14 shows the single mixer defect")
+mixer = model.class_by_desc("Lde/offlineflipnote/legacy/PpmAudioMixer;")
+assert all(m.code is None for m in mixer.virtual_methods if m.key.name == "mix"), "1.4.16: mix() is native"
+print("PASS: Dalvik narrowing check clean for 1.4.16 and 1.4.15; reference 1.4.14 shows the single mixer defect")

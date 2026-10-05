@@ -1,12 +1,15 @@
 Buildreferenz: reference/base-v1.4.11.apk
 APK SHA256: 291e62d997cefec2a5fef16cf3dcbd942f213cb77cd7b2baab4b539ccee2da90
 Die ursprünglichen Java-Methodenkörper und Ressourcen werden aus dieser APK übernommen.
-DEX-Erzeugung: tools/patch-dex-v1415.py = BrowserActivity-Brücke aus 1.4.12 + Dalvik-Korrektur.
-Von den 167 Player-Methodenkörpern sind 165 instruktionsgleich mit 1.4.11; geändert sind
-PpmAudioMixer.mix (ein eingefügtes int-to-short vor aput-short, zwei angepasste Sprungweiten)
-und PpmAudioEngine.positionOf (try/catch RuntimeException wie in 1.3.2, Handler am Methodenende).
-Neu: Klasse CrashLog (Konstruktor + native uncaughtException).
-classes.dex SHA256 (1.4.15): 645269eac2cf343dc8e10a15c0b7f0ce610d939d6620f2ad20cbcef6a9000de9
-Neu kompiliert: native Browserbibliotheken für fünf ABIs (ZIP-Modul, Absturzprotokoll, JNI_OnLoad).
-Version 1.4.15 / versionCode 31 / minSdk 7 / targetSdk 28.
+DEX-Erzeugung: tools/patch-dex-v1416.py = BrowserActivity-Brücke aus 1.4.12 + Dalvik-Korrektur
+aus 1.4.15 + native Mischung und Takt aus 1.4.16.
+Von den 167 Player-Methodenkörpern sind 164 instruktionsgleich mit 1.4.11; geändert sind
+PpmAudioEngine.positionOf (try/catch RuntimeException wie in 1.3.2, seit 1.4.15),
+MainActivity$1.run (invoke-static tickDelayMillis()J + move-result-wide statt const-wide/16 #16)
+und PpmAudioMixer.mix (kein Bytecode mehr, public native; Implementierung in native/audio_mixer.inc).
+Neu: Klasse CrashLog (1.4.15), Methode MainActivity.tickDelayMillis()J public static native (1.4.16).
+classes.dex SHA256 (1.4.16): 1a38875348bc80f5c0ca1fbf56facf891d51e48d30d1ba8ed39781222752f844
+Neu kompiliert: native Bibliotheken für fünf ABIs (Browser, ZIP-Modul, Galerie-Pager mit
+ID-Cache und Taktwahl, Absturzprotokoll, Audio-Mixer).
+Version 1.4.16 / versionCode 32 / minSdk 7 / targetSdk 28.
 Dieses Paket ist kein vollständiger Gradle-Java-Quellbaum des ursprünglichen Players.
