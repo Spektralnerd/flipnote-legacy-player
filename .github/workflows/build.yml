@@ -1,0 +1,64 @@
+name: Build und Tests
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Unsignierte APK bauen und pruefen
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Werkzeuge (Clang, LLD, llvm-objcopy, readelf, Signaturbibliotheken)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm binutils
+          python3 -m pip install -r requirements-signing.txt
+      - name: Bauen (reproduzierbar, unsigniert)
+        run: sh build-release.sh build/Flipnote-Legacy-Player-unsigned.apk
+      - name: Freigabepruefung
+        run: python3 tools/validate-v1416.py build/Flipnote-Legacy-Player-unsigned.apk --unsigned | tee build/validierung-ci.txt
+      - name: Zweiter Build muss byteidentisch sein
+        run: |
+          cp build/Flipnote-Legacy-Player-unsigned.apk build/erster-build.apk
+          sh build-release.sh build/Flipnote-Legacy-Player-unsigned.apk
+          cmp build/erster-build.apk build/Flipnote-Legacy-Player-unsigned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Flipnote-Legacy-Player-unsigned-apk
+          path: |
+            build/Flipnote-Legacy-Player-unsigned.apk
+            build/validierung-ci.txt
+
+  tests:
+    name: Host-Tests (C, Python, JNI-Desktop-JVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Werkzeuge (Clang, LLD, GCC fuer die Sanitizer-Laeufe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm binutils gcc
+      - name: Decoder-, ZIP-, Mixer- und Strukturtests
+        run: sh tests/run-host-tests.sh
+      - name: Dieselben Tests unter AddressSanitizer/UBSan
+        run: CLANG=gcc SANITIZE=1 sh tests/run-host-tests.sh
+      - name: Scroll-/Fling-Modell
+        run: sh tests/run-controls-test.sh
+      - name: JNI-Hosttest (API 7/8, ZIP-Cache, Absturzprotokoll, nativer Mixer, UI-Takt)
+        run: sh tests/run-jni-host-test.sh

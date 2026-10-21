@@ -1,9 +1,16 @@
 # Generated native/test files
 build/fake/
 build/host-tests/
+build/jni-host/
+build/tmp/
 build/validation/
 build/libs/
+# Extracted from reference/base-v1.4.11.apk by build-release.sh
+build/base.dex
+build/base-manifest.xml
+# Build outputs are not committed; the build reference APK is
 *.apk
+!reference/base-v1.4.11.apk
 
 # Local Android/Gradle data
 .gradle/
